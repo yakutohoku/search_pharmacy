@@ -730,8 +730,7 @@ def main() -> None:
     file_bytes: Optional[bytes] = None
 
     if load_mode == "Excelをアップロード":
-        st.sidebar.write("Excelファイルを選択してください。")
-        st.sidebar.caption("例：【薬局検索用】東北 薬局リスト.xlsm")
+        st.sidebar.write("例：【薬局検索用】東北 薬局リスト.xlsm")
 
         uploaded = st.sidebar.file_uploader(
             "Excelファイル",
