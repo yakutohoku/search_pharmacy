@@ -57,7 +57,7 @@ except Exception:
 # =============================================================================
 # 設定
 # =============================================================================
-DEFAULT_LOCAL_FILE = r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\【薬局検索用】東北 薬局リスト.xlsm"
+DEFAULT_LOCAL_FILE = r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索\東北 薬局リスト.xlsm"
 
 JOB_BASE_URL = "https://yaku-job.com/preview/"
 GOOGLE_MAPS_QUERY_URL = "https://www.google.com/maps/search/?api=1&query={lat},{lon}"
@@ -731,7 +731,6 @@ def main() -> None:
 
    if load_mode == "Excelをアップロード":
     st.sidebar.write("Excelファイルを選択してください。")
-    st.sidebar.caption("例：【薬局検索用】東北 薬局リスト.xlsm")  # ← これ
     uploaded = st.sidebar.file_uploader(
         "Excelファイル",
         type=["xlsm", "xlsx"],
