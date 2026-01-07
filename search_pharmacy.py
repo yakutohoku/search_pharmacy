@@ -729,14 +729,13 @@ def main() -> None:
 
     file_bytes: Optional[bytes] = None
 
-   if load_mode == "Excelをアップロード":
-    st.sidebar.write("Excelファイルを選択してください。")
-    uploaded = st.sidebar.file_uploader(
-        "Excelファイル",
-        type=["xlsm", "xlsx"],
-        label_visibility="collapsed",
-    )
-
+    if load_mode == "Excelをアップロード":
+        st.sidebar.write("Excelファイルを選択してください。")
+        uploaded = st.sidebar.file_uploader(
+            "Excelファイル",
+            type=["xlsm", "xlsx"],
+            label_visibility="collapsed",
+        )
         if uploaded is not None:
             file_bytes = uploaded.getvalue()
     else:
