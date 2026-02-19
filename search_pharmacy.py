@@ -26,11 +26,13 @@
 ⑦ 駅名検索を安定させる改修
    - 住所/駅名の候補が複数取れた場合、「薬局データの中心に最も近い候補」を採用
 
-【追加要望（今回反映）】
+【今回反映する要望（Streamlit Cloud対応）】
 ⑧ 「PC上のファイルパスを指定」を削除
-⑨ file_uploader の英語メッセージを日本語化（CSS）
-⑩ 参照ファイルのパスをテキスト表示
-⑪ 参照ファイルを file:// リンクとして表示（環境によっては開けない）
+⑨ Drag and drop file here を日本語に
+⑩ Browse files を日本語化
+⑪ 参照フォルダパスをテキスト表示
+⑫ パスのコピーボタン設置（Streamlit Cloudで動作）
+⑬ フォルダ内のリスト一覧をテキスト表示（Cloudでは実参照不可なので手動定義）
 
 """
 
@@ -66,11 +68,14 @@ except Exception:
 JOB_BASE_URL = "https://yaku-job.com/preview/"
 GOOGLE_MAPS_QUERY_URL = "https://www.google.com/maps/search/?api=1&query={lat},{lon}"
 
-# 参照ファイル（表示用）
-REFERENCE_FILES = {
-    "東北エリア": r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索\東北 薬局リスト.xlsm",
-    "北海道エリア": r"\\file-tky\Section\薬剤師共有\★【支店・課】_北海道\北海道\薬局検索\北海道 薬局リスト.xlsm",
-}
+# 参照フォルダ（表示のみ）
+REFERENCE_FOLDER = r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索"
+
+# Streamlit Cloudでは os.listdir() が使えないので、リストは手動定義
+REFERENCE_FILE_LIST = [
+    "東北 薬局リスト.xlsm",
+    "北海道 薬局リスト.xlsm",
+]
 
 # Excel列（0-based index）
 # C=2, E=4, I=8, K=10, L=11, M=12, N=13, O=14, P=15, Q=16
@@ -211,11 +216,9 @@ def _apply_ui_css() -> None:
     st.markdown(
         """
         <style>
-        /* 余白を詰めて地図を大きく取る */
         .block-container { padding-top: 1.2rem; padding-bottom: 1.0rem; }
         header[data-testid="stHeader"] { height: 0.2rem; }
 
-        /* タイトル（見切れ防止 + 2pt相当小さく） */
         div[data-testid="stAppViewContainer"] h1 {
             font-size: 30px !important;
             font-weight: 800 !important;
@@ -227,13 +230,11 @@ def _apply_ui_css() -> None:
             white-space: normal !important;
         }
 
-        /* file_uploader の案内文（英語）を隠して、日本語を重ねる */
         div[data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"] { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] > div:nth-child(1) { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] p { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] small { display:none !important; }
 
-        /* Drag and drop メッセージを日本語で表示 */
         div[data-testid="stFileUploaderDropzone"]::before{
             content:"ここにExcelファイルをドラッグ＆ドロップ、または「ファイルを選択」を押してください";
             display:block;
@@ -243,7 +244,6 @@ def _apply_ui_css() -> None:
             color:rgba(49,51,63,0.9);
         }
 
-        /* Browse files を「ファイルを選択」に（ボタン文字を置き換え） */
         div[data-testid="stFileUploaderDropzone"] button{
             position:relative;
         }
@@ -271,17 +271,13 @@ def _apply_ui_css() -> None:
 # =============================================================================
 @st.cache_data(show_spinner=False)
 def load_pharmacy_data(file_bytes: bytes) -> pd.DataFrame:
-    """
-    Excelを読み込み、先頭（最左）シートからデータを取り出す。
-    緯度(P列)・経度(Q列)が空の行は地図表示できないため除外する。
-    """
     import openpyxl
 
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True, read_only=True)
     if not wb.sheetnames:
         raise ValueError("Excelにシートが存在しません。")
 
-    sheet = wb[wb.sheetnames[0]]  # 先頭シート固定
+    sheet = wb[wb.sheetnames[0]]
 
     records: List[Dict[str, Any]] = []
 
@@ -336,7 +332,6 @@ def load_pharmacy_data(file_bytes: bytes) -> pd.DataFrame:
 # 地図：読み込みオーバーレイ（ブラウザ側）
 # =============================================================================
 def add_map_loading_overlay(m: folium.Map, message: str = "検索中・・・地図を読み込み中です") -> None:
-    """Leaflet(ブラウザ側)でタイル読み込み中に、地図の上へメッセージを表示する。"""
     msg = _escape_html(message)
     map_name = m.get_name()
 
@@ -716,20 +711,38 @@ def main() -> None:
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
 
-    # 参照ファイル表示（テキスト＋file://リンク）
+    # -------------------------------------------------------------------------
+    # 参照フォルダ（Cloud対応：表示とコピーのみ）
+    # -------------------------------------------------------------------------
     st.sidebar.markdown("---")
-    st.sidebar.markdown("★参照ファイル")
+    st.sidebar.markdown("★参照フォルダ")
 
-    for area, path in REFERENCE_FILES.items():
-        st.sidebar.markdown(f"**【{area}】**")
-        st.sidebar.code(path, language="text")
+    st.sidebar.code(REFERENCE_FOLDER, language="text")
 
-        file_url = "file:///" + path.replace("\\", "/")
-        st.sidebar.markdown(
-            f'<a href="{file_url}" target="_blank">この参照ファイルを開く</a>',
-            unsafe_allow_html=True,
-        )
+    escaped_path = REFERENCE_FOLDER.replace("\\", "\\\\")
+    st.sidebar.markdown(
+        f"""
+        <button onclick="navigator.clipboard.writeText('{escaped_path}')"
+        style="
+            background-color:#f0f2f6;
+            border:1px solid #ccc;
+            padding:6px 10px;
+            border-radius:6px;
+            cursor:pointer;
+            font-size:13px;">
+            フォルダのパスをコピー
+        </button>
+        """,
+        unsafe_allow_html=True,
+    )
 
+    st.sidebar.markdown("★リスト一覧")
+    for f in REFERENCE_FILE_LIST:
+        st.sidebar.write(f"・{f}")
+
+    # -------------------------------------------------------------------------
+    # Excel読み込みが無い場合は終了
+    # -------------------------------------------------------------------------
     if file_bytes is None:
         st.info("左の「1. データを読み込む」からExcelを読み込んでください。")
         st.stop()
@@ -807,13 +820,13 @@ def main() -> None:
         ceo_raw = st.sidebar.text_input("社長名（苗字+名前）", value=st.session_state.ceo_query_raw)
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.button("この社長名で検索"):
+            if st.sidebar.button("この社長名で検索"):
                 st.session_state.ceo_query_raw = ceo_raw
                 st.session_state.clicked_point = None
                 st.session_state.pending_point = None
                 st.session_state.corp_query_raw = ""
         with c2:
-            if st.button("解除"):
+            if st.sidebar.button("解除"):
                 st.session_state.ceo_query_raw = ""
 
     # -------------------------------------------------------------------------
