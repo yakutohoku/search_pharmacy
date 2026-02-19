@@ -588,16 +588,11 @@ def build_map(
     for p in points:
         uid = p.get("uid")
         if selected_uid is not None and uid == selected_uid:
-            folium.CircleMarker(
+            folium.Marker(
                 location=(p["lat"], p["lon"]),
-                radius=16,
-                weight=3,
-                color="red",
-                fill=True,
-                fill_color="red",
-                fill_opacity=0.95,
                 tooltip=p["tooltip"],
                 popup=folium.Popup(p["popup_html"], max_width=520),
+                icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
             ).add_to(cluster)
         else:
             folium.Marker(
@@ -1124,7 +1119,7 @@ def main() -> None:
                 for _, r in tmp.iterrows():
                     uid = str(r["UID"])
                     pref_disp = prefecture_display(r["都道府県"])
-                    label = f"{r['薬局名']}（{pref_disp}）"
+                    label = f"{r['薬局名']}"
                     is_selected = (st.session_state.selected_map_uid == uid)
                     btn_label = ("✅ " if is_selected else "") + label
                     if st.button(btn_label, key=f"pick_{uid}"):
