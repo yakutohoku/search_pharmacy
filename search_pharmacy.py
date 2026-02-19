@@ -933,26 +933,41 @@ def main() -> None:
             if st.sidebar.button("解除"):
                 st.session_state.ceo_query_raw = ""
 
-    else:
-        # ★追加：薬局で検索（部分一致 + 都道府県）
-        st.sidebar.caption("薬局名は部分一致で検索できます。都道府県で絞り込みも可能です。")
-        name_q = st.sidebar.text_input("薬局名（部分一致）", value=st.session_state.pharmacy_query_raw)
-        pref_q = st.sidebar.selectbox("都道府県", PREF_LIST, index=PREF_LIST.index(st.session_state.pref_query) if st.session_state.pref_query in PREF_LIST else 0)
+else:
+    # ★追加：薬局で検索（部分一致 + 都道府県）
+    st.sidebar.caption("薬局名は部分一致で検索できます。都道府県で絞り込みも可能です。")
 
-        c1, c2 = st.sidebar.columns(2)
-        with c1:
-            if st.sidebar.button("この条件で検索"):
-                st.session_state.pharmacy_query_raw = name_q
-                st.session_state.pref_query = pref_q
-                st.session_state.clicked_point = None
-                st.session_state.pending_point = None
-                st.session_state.corp_query_raw = ""
-                st.session_state.ceo_query_raw = ""
-                st.session_state.selected_pin_uid = None
-        with c2:
-            if st.sidebar.button("解除"):
-                st.session_state.pharmacy_query_raw = ""
-                st.session_state.pref_query = ""
+    name_q = st.sidebar.text_input(
+        "薬局名（部分一致）",
+        value=st.session_state.pharmacy_query_raw
+    )
+
+    default_index = 0
+    if st.session_state.pref_query in PREF_LIST:
+        default_index = PREF_LIST.index(st.session_state.pref_query)
+
+    pref_q = st.sidebar.selectbox(
+        "都道府県",
+        PREF_LIST,
+        index=default_index,
+    )
+
+    c1, c2 = st.sidebar.columns(2)
+    with c1:
+        if st.sidebar.button("この条件で検索"):
+            st.session_state.pharmacy_query_raw = name_q
+            st.session_state.pref_query = pref_q
+            st.session_state.clicked_point = None
+            st.session_state.pending_point = None
+            st.session_state.corp_query_raw = ""
+            st.session_state.ceo_query_raw = ""
+            st.session_state.selected_pin_uid = None
+
+    with c2:
+        if st.sidebar.button("解除"):
+            st.session_state.pharmacy_query_raw = ""
+            st.session_state.pref_query = ""
+
 
     # -------------------------------------------------------------------------
     # 絞り込み
