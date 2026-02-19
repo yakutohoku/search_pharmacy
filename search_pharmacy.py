@@ -1,20 +1,15 @@
 """
 薬局検索マップ（Streamlit + Folium）
 
-- Excel先頭シートのP列(緯度)・Q列(経度)を使って薬局を地図表示
-- 検索：
-  1) 住所・駅名（半径）※外部通信必要
-  2) 地図クリック（半径）
-  3) 法人名（スペース無視・完全一致）
-  4) 社長名（スペース無視・完全一致）
-  5) 薬局名（部分一致）＋都道府県プルダウン
-- 一覧：
-  - 薬局名ボタン（クリックでズーム15、該当ピンを赤で強調）
-  - data_editorの☑選択 → Excel出力
-- Streamlit Cloud対応：
-  - 「PC上のファイルパス指定」削除
-  - file_uploader文言を日本語に見せるCSS
-  - 参照フォルダ/リストは「未読込時のみ表示」
+変更点（ご要望対応）
+1) 薬局を選んだら、ピンを赤で強調する（中心・ズームは維持）
+2) 薬局名ボタンを廃止：一覧表の「行クリック」でピン強調（タブで一覧/Excel選択を整理）
+   - 一覧タブ：行クリック → selected_pin_uid を更新（地図上の該当ピンのみ赤）
+   - Excel出力タブ：☑で選択 → Excelダウンロード
+3) コード全文を差し替え可能な形で提供（この .py をそのまま配置）
+
+注意
+- 住所/駅名検索（ジオコーディング）は外部通信が必要です（社内ネットワーク制限がある場合は失敗します）
 """
 
 from __future__ import annotations
@@ -339,10 +334,7 @@ def add_map_loading_overlay(m: folium.Map, message: str = "検索中・・・地
 
     macro = MacroElement()
     macro._template = tpl
-    m.get_root().add_child(macro
-
-
-    )
+    m.get_root().add_child(macro)
 
 
 # =============================================================================
@@ -351,6 +343,8 @@ def add_map_loading_overlay(m: folium.Map, message: str = "検索中・・・地
 def _make_popup_html(r: pd.Series) -> str:
     name = _escape_html(str(r.get("薬局名", "")))
     opener_full = _escape_html(str(r.get("開設者氏名", "")))
+    corp = _escape_html(str(r.get("法人名", "")))
+    ceo = _escape_html(str(r.get("社長名", "")))
     addr = _escape_html(str(r.get("住所", "")))
 
     lat = float(r["緯度"])
@@ -376,7 +370,9 @@ def _make_popup_html(r: pd.Series) -> str:
     return f"""
     <div style="font-size:13px;line-height:1.4;max-width:420px;">
       <div style="font-size:14px;"><b>{name}</b></div>
-      <div>法人名: {opener_full}</div>
+      <div>法人名: {corp}</div>
+      <div>社長名: {ceo}</div>
+      <div>開設者氏名: {opener_full}</div>
       <div>住所: {addr}</div>
       <div style="margin-top:6px;">
         <a href="{gmap}" target="_blank" rel="noopener noreferrer">Googleマップを開く</a>
@@ -730,26 +726,26 @@ def main() -> None:
         corp_raw = st.sidebar.text_input("法人名", value=st.session_state.corp_query_raw)
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.sidebar.button("この法人で検索"):
+            if st.button("この法人で検索"):
                 st.session_state.corp_query_raw = corp_raw
                 st.session_state.clicked_point = None
                 st.session_state.pending_point = None
                 st.session_state.selected_pin_uid = None
         with c2:
-            if st.sidebar.button("解除"):
+            if st.button("解除"):
                 st.session_state.corp_query_raw = ""
 
     elif search_mode == "社長名で検索":
         ceo_raw = st.sidebar.text_input("社長名（苗字+名前）", value=st.session_state.ceo_query_raw)
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.sidebar.button("この社長名で検索"):
+            if st.button("この社長名で検索"):
                 st.session_state.ceo_query_raw = ceo_raw
                 st.session_state.clicked_point = None
                 st.session_state.pending_point = None
                 st.session_state.selected_pin_uid = None
         with c2:
-            if st.sidebar.button("解除"):
+            if st.button("解除"):
                 st.session_state.ceo_query_raw = ""
 
     else:
@@ -763,12 +759,12 @@ def main() -> None:
 
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.sidebar.button("この条件で検索"):
+            if st.button("この条件で検索"):
                 st.session_state.pharmacy_query_raw = name_q
                 st.session_state.pref_query = pref_q
                 st.session_state.selected_pin_uid = None
         with c2:
-            if st.sidebar.button("解除"):
+            if st.button("解除"):
                 st.session_state.pharmacy_query_raw = ""
                 st.session_state.pref_query = ""
 
@@ -816,18 +812,10 @@ def main() -> None:
     # ---- レイアウト
     col_map, col_list = st.columns([5, 2], gap="large")
 
+    # ★変更：選択した薬局があっても「ズームしない」
     highlight_uid = st.session_state.selected_pin_uid
-    if highlight_uid:
-        row = df[df["UID"].astype(str) == str(highlight_uid)]
-        if not row.empty:
-            center = (float(row.iloc[0]["緯度"]), float(row.iloc[0]["経度"]))
-            zoom = 15
-        else:
-            center = (float(df["緯度"].mean()), float(df["経度"].mean()))
-            zoom = 8
-    else:
-        center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
-        zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
+    center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+    zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
 
     # ---- 地図
     with col_map:
@@ -868,39 +856,58 @@ def main() -> None:
                     st.session_state.pending_point = None
                     st.session_state.selected_pin_uid = None
 
-    # ---- 一覧
+    # ---- 一覧（ボタン廃止：表クリックで強調 / Excelは別タブで整理）
     with col_list:
         st.subheader("一覧")
-
         if show_df.empty:
             st.info("表示対象がありません。")
-        else:
-            st.caption("薬局名をクリックすると、地図がその薬局へズームします。")
+            st.stop()
 
-            max_buttons = 200
-            df_for_buttons = show_df.head(max_buttons)
+        tab_list, tab_export = st.tabs(["一覧（クリックで地図で強調）", "Excel出力（☑で選択）"])
 
-            for _, r in df_for_buttons.iterrows():
-                uid = str(r["UID"])
-                label = r["薬局名"]
-                if highlight_uid == uid:
-                    label = f"▶ {label}"
-                if st.button(label, key=f"ph_btn_{uid}"):
-                    st.session_state.selected_pin_uid = uid
-                    st.rerun()
+        # --- 一覧タブ：行クリックで selected_pin_uid 更新
+        with tab_list:
+            st.caption("行をクリックすると、地図上の該当ピンだけ赤で強調します（ズームはしません）。")
 
-            if len(show_df) > max_buttons:
-                st.info(f"件数が多いため、薬局名ボタンは先頭 {max_buttons} 件のみ表示しています。")
+            list_view = show_df[["UID", "薬局名", "法人名", "住所"]].copy().reset_index(drop=True)
 
-        st.markdown("---")
-        st.caption("☑で選択すると、下からExcelダウンロードできます。")
+            # st.dataframe の選択イベント（Streamlitのバージョンによっては未対応の場合あり）
+            try:
+                ev = st.dataframe(
+                    list_view.drop(columns=["UID"]),
+                    use_container_width=True,
+                    height=520,
+                    hide_index=True,
+                    on_select="rerun",
+                    selection_mode="single-row",
+                    key="list_click_df",
+                )
+                if ev is not None and hasattr(ev, "selection"):
+                    rows = (ev.selection or {}).get("rows", [])
+                    if rows:
+                        idx = int(rows[0])
+                        uid = str(list_view.iloc[idx]["UID"])
+                        st.session_state.selected_pin_uid = uid
+            except TypeError:
+                # 古いStreamlitの場合：選択イベントが使えないのでメッセージを出す
+                st.info("この環境のStreamlitでは『行クリック選択』が使えません。必要ならStreamlitの更新をご検討ください。")
 
-        view = add_link_columns(show_df).reset_index(drop=True)
-        cols = ["☑", "薬局名", "法人名", "住所", "Googleマップ", "管理薬剤師求人", "常勤求人", "パート求人", "派遣求人", "契約社員"]
+            # 強調解除
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                if st.button("地図の強調を解除"):
+                    st.session_state.selected_pin_uid = None
 
-        if view.empty:
-            st.info("表示対象がありません。")
-        else:
+            with c2:
+                if highlight_uid:
+                    st.write("強調中：1件")
+
+        # --- Excel出力タブ：☑で選択
+        with tab_export:
+            st.caption("☑で選択すると、下からExcelをダウンロードできます。")
+            view = add_link_columns(show_df).reset_index(drop=True)
+
+            cols = ["☑", "薬局名", "法人名", "住所", "Googleマップ", "管理薬剤師求人", "常勤求人", "パート求人", "派遣求人", "契約社員"]
             display_uids = view["UID"].astype(str).tolist()
 
             base = view.drop(columns=["☑"], errors="ignore").copy()
@@ -937,28 +944,28 @@ def main() -> None:
             selected |= checked_uids
             st.session_state.selected_uids = selected
 
-        st.markdown("---")
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.write(f"☑ 選択中：{len(st.session_state.selected_uids):,}件")
-        with c2:
-            if st.button("☑選択をすべて解除"):
-                st.session_state.selected_uids = set()
-                st.session_state.list_editor_df = None
-                st.session_state.list_editor_uids = []
-                st.session_state.pop("list_editor", None)
+            st.markdown("---")
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.write(f"☑ 選択中：{len(st.session_state.selected_uids):,}件")
+            with c2:
+                if st.button("☑選択をすべて解除"):
+                    st.session_state.selected_uids = set()
+                    st.session_state.list_editor_df = None
+                    st.session_state.list_editor_uids = []
+                    st.session_state.pop("list_editor", None)
 
-        sel_df = df[df["UID"].astype(str).isin(st.session_state.selected_uids)].copy()
-        if not sel_df.empty:
-            xlsx_bytes = build_selected_excel_bytes(sel_df)
-            st.download_button(
-                label="選択した薬局をExcelでダウンロード",
-                data=xlsx_bytes,
-                file_name="選択薬局リスト.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        else:
-            st.info("☑を付けると、ここからExcelをダウンロードできます。")
+            sel_df = df[df["UID"].astype(str).isin(st.session_state.selected_uids)].copy()
+            if not sel_df.empty:
+                xlsx_bytes = build_selected_excel_bytes(sel_df)
+                st.download_button(
+                    label="選択した薬局をExcelでダウンロード",
+                    data=xlsx_bytes,
+                    file_name="選択薬局リスト.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.info("☑を付けると、ここからExcelをダウンロードできます。")
 
 
 if __name__ == "__main__":
