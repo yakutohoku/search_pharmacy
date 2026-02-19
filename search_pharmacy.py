@@ -1054,9 +1054,7 @@ def main() -> None:
         st.subheader("地図")
         pending_point: Optional[SearchPoint] = st.session_state.pending_point
 
-        # 薬局名で検索のときは「検索結果だけ」ではなく、読み込んだ薬局データをすべて地図に表示する
-        map_df = df if mode_label == "薬局名で検索" else show_df
-
+        map_df = show_df
         if len(map_df) > int(st.session_state.max_map_markers):
             st.warning(
                 f"表示が重くなるため、地図のピンは先頭 {int(st.session_state.max_map_markers):,} 件に制限しています。"
