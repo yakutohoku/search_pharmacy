@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import folium
-from folium.plugins import MarkerCluster
+from folium.plugins import MarkerCluster, FastMarkerCluster
 from streamlit_folium import st_folium
 from branca.element import MacroElement, Template
 
@@ -512,19 +512,44 @@ def _make_popup_html(r: pd.Series) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def prepare_points_for_map(df: pd.DataFrame) -> List[Dict[str, Any]]:
+def build_all_points(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """
+    全件の地図表示用ポイントを1回だけ作り、UID->index を持って高速に部分抽出できるようにする。
+    （検索条件が変わっても、ポップアップHTML生成を繰り返さないため体感速度が上がります）
+    """
     pts: List[Dict[str, Any]] = []
-    for _, r in df.iterrows():
-        pts.append(
-            {
-                "uid": str(r.get("UID", "")),
-                "lat": float(r["緯度"]),
-                "lon": float(r["経度"]),
-                "tooltip": str(r.get("薬局名", "")),
-                "popup_html": _make_popup_html(r),
-            }
-        )
-    return pts
+    uid_to_idx: Dict[str, int] = {}
+    for i, (_, r) in enumerate(df.iterrows()):
+        uid = str(r.get("UID", ""))
+        p = {
+            "uid": uid,
+            "lat": float(r["緯度"]),
+            "lon": float(r["経度"]),
+            "tooltip": str(r.get("薬局名", "")),
+            "popup_html": _make_popup_html(r),
+        }
+        uid_to_idx[uid] = i
+        pts.append(p)
+    return pts, uid_to_idx
+
+
+def pick_points_from_uids(points_all: List[Dict[str, Any]], uid_to_idx: Dict[str, int], uids: List[str]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for uid in uids:
+        i = uid_to_idx.get(str(uid))
+        if i is not None:
+            out.append(points_all[i])
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def json_rows_for_fast_cluster(points: List[Dict[str, Any]]) -> List[List[Any]]:
+    """
+    FastMarkerCluster 用のデータ（JSへ渡す配列）
+    row = [lat, lon, popup_html, tooltip]
+    """
+    return [[p["lat"], p["lon"], p["popup_html"], p.get("tooltip", "")] for p in points]
+
 
 
 def build_map(
@@ -584,23 +609,52 @@ def build_map(
                 ).add_to(m)
                 break
 
-    cluster = MarkerCluster(name="薬局").add_to(m)
-    for p in points:
-        uid = p.get("uid")
-        if selected_uid is not None and uid == selected_uid:
+    # --- 薬局ピン ---
+    # 大量ピンは FastMarkerCluster を使うと、Python側の生成コストが大きく減って軽くなります。
+    fast_threshold = 1200
+
+    # 選択中（薬局名検索）の赤ピンは「別で1本」表示し、通常ピン（青）と重複しないように除外する
+    selected_point: Optional[Dict[str, Any]] = None
+    if selected_uid:
+        for p in points:
+            if p.get("uid") == selected_uid:
+                selected_point = p
+                break
+
+    blue_points = points
+    if selected_point is not None:
+        blue_points = [p for p in points if p.get("uid") != selected_uid]
+
+    if len(blue_points) > fast_threshold:
+        # FastMarkerCluster（青ピン）
+        rows = json_rows_for_fast_cluster(blue_points)
+        callback = """
+        function (row) {
+            var marker = L.marker(new L.LatLng(row[0], row[1]), {icon: new L.Icon.Default()});
+            if (row[3]) { marker.bindTooltip(row[3]); }
+            if (row[2]) { marker.bindPopup(row[2], {maxWidth: 480}); }
+            return marker;
+        }
+        """
+        FastMarkerCluster(rows, callback=callback, name="薬局").add_to(m)
+    else:
+        cluster = MarkerCluster(name="薬局").add_to(m)
+        for p in blue_points:
             folium.Marker(
                 location=(p["lat"], p["lon"]),
-                tooltip=p["tooltip"],
-                popup=folium.Popup(p["popup_html"], max_width=520),
-                icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
-            ).add_to(cluster)
-        else:
-            folium.Marker(
-                location=(p["lat"], p["lon"]),
-                tooltip=p["tooltip"],
+                tooltip=p.get("tooltip", ""),
                 popup=folium.Popup(p["popup_html"], max_width=480),
                 icon=folium.Icon(color="blue", icon="info-sign"),
             ).add_to(cluster)
+
+    # 選択中の赤ピン（薬局名検索）
+    if selected_point is not None:
+        folium.Marker(
+            location=(selected_point["lat"], selected_point["lon"]),
+            tooltip=selected_point.get("tooltip", ""),
+            popup=folium.Popup(selected_point["popup_html"], max_width=520),
+            icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
+        ).add_to(m)
 
     folium.LayerControl().add_to(m)
     return m
@@ -857,6 +911,7 @@ def main() -> None:
     # -------------------------------------------------------------------------
     try:
         df = load_pharmacy_data(file_bytes)
+        points_all, uid_to_idx = build_all_points(df)
     except Exception as e:
         st.error(f"読み込みに失敗しました: {e}")
         st.stop()
@@ -1054,7 +1109,9 @@ def main() -> None:
         st.subheader("地図")
         pending_point: Optional[SearchPoint] = st.session_state.pending_point
 
-        map_df = show_df
+        # 薬局名で検索のときは「検索結果だけ」ではなく、読み込んだ薬局データをすべて地図に表示する
+        map_df = df if mode_label == "薬局名で検索" else show_df
+
         if len(map_df) > int(st.session_state.max_map_markers):
             st.warning(
                 f"表示が重くなるため、地図のピンは先頭 {int(st.session_state.max_map_markers):,} 件に制限しています。"
@@ -1063,7 +1120,8 @@ def main() -> None:
             map_df = map_df.head(int(st.session_state.max_map_markers))
 
         with st.spinner("検索中・・・地図を表示しています"):
-            points = prepare_points_for_map(map_df)
+            uids = map_df['UID'].astype(str).tolist()
+            points = pick_points_from_uids(points_all, uid_to_idx, uids)
             fmap = build_map(
                 center=center,
                 zoom=zoom,
