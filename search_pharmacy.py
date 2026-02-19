@@ -1124,7 +1124,6 @@ def main() -> None:
                     btn_label = ("✅ " if is_selected else "") + label
                     if st.button(btn_label, key=f"pick_{uid}"):
                         st.session_state.selected_map_uid = uid
-                        st.success(f"選択：{label}")
 
                 if st.session_state.selected_map_uid:
                     st.markdown("---")
