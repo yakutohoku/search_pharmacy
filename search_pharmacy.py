@@ -1,15 +1,18 @@
 """
 薬局検索マップ（Streamlit + Folium）
 
-変更点（ご要望対応）
-1) 薬局を選んだら、ピンを赤で強調する（中心・ズームは維持）
-2) 薬局名ボタンを廃止：一覧表の「行クリック」でピン強調（タブで一覧/Excel選択を整理）
-   - 一覧タブ：行クリック → selected_pin_uid を更新（地図上の該当ピンのみ赤）
-   - Excel出力タブ：☑で選択 → Excelダウンロード
-3) コード全文を差し替え可能な形で提供（この .py をそのまま配置）
+ご要望対応（2026-02-19版）
+① 一覧クリックの「1つ前が強調」問題を解消：
+   - 一覧の選択状態を、地図描画“前”に session_state から読み取り反映
+② 薬局を選択したら「2km圏内」へズーム：
+   - 選択薬局を中心にズーム（既定ズーム=14）＋2km円を表示
+③ Excel出力は複数選択（☑）を維持：
+   - Excel出力タブの data_editor ☑ は複数選択可（従来通り）
+④ ☑操作のたびに地図が広角へ戻る問題を解消：
+   - st_folium から center/zoom を受け取り、セッションに保存して次回描画に反映（ズーム維持）
 
 注意
-- 住所/駅名検索（ジオコーディング）は外部通信が必要です（社内ネットワーク制限がある場合は失敗します）
+- 住所/駅名検索（ジオコーディング）は外部通信が必要です（ネットワーク制限がある場合は失敗します）
 """
 
 from __future__ import annotations
@@ -65,6 +68,10 @@ COL = {
     "lat": 15,             # P: 緯度
     "lon": 16,             # Q: 経度
 }
+
+# 薬局を選択した時のズーム（2km圏内目安）
+FOCUS_ZOOM = 14
+FOCUS_RADIUS_KM = 2.0
 
 
 # =============================================================================
@@ -573,6 +580,8 @@ def build_map(
     radius_km: Optional[float],
     pending_point: Optional[SearchPoint],
     highlight_uid: Optional[str] = None,
+    focus_circle_center: Optional[SearchPoint] = None,
+    focus_circle_radius_km: Optional[float] = None,
 ) -> folium.Map:
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
 
@@ -598,6 +607,15 @@ def build_map(
                 weight=2,
             ).add_to(m)
 
+    # 選択薬局の2km円（ご要望②）
+    if focus_circle_center is not None and focus_circle_radius_km and focus_circle_radius_km > 0:
+        folium.Circle(
+            location=(focus_circle_center.lat, focus_circle_center.lon),
+            radius=focus_circle_radius_km * 1000,
+            fill=False,
+            weight=2,
+        ).add_to(m)
+
     cluster = MarkerCluster(name="薬局").add_to(m)
 
     for p in points:
@@ -615,6 +633,38 @@ def build_map(
 
     folium.LayerControl().add_to(m)
     return m
+
+
+# =============================================================================
+# 一覧クリックの選択状態を、地図描画の前に同期（ご要望①）
+# =============================================================================
+def sync_selected_pin_from_list_table(show_df: pd.DataFrame) -> None:
+    state = st.session_state.get("list_click_df")
+    if not state:
+        return
+
+    selection = None
+    if isinstance(state, dict):
+        selection = state.get("selection")
+    else:
+        selection = getattr(state, "selection", None)
+
+    if not selection:
+        return
+
+    rows = selection.get("rows") if isinstance(selection, dict) else None
+    if not rows:
+        return
+
+    idx = int(rows[0])
+    if idx < 0:
+        return
+
+    try:
+        uid = str(show_df.reset_index(drop=True).iloc[idx]["UID"])
+        st.session_state.selected_pin_uid = uid
+    except Exception:
+        return
 
 
 # =============================================================================
@@ -639,6 +689,10 @@ def main() -> None:
     st.session_state.setdefault("selected_uids", set())
     st.session_state.setdefault("list_editor_df", None)
     st.session_state.setdefault("list_editor_uids", [])
+
+    # 地図の表示状態を保持（ご要望④）
+    st.session_state.setdefault("map_view_center", None)  # (lat, lon)
+    st.session_state.setdefault("map_view_zoom", None)    # int
 
     # ---- 読み込み
     st.sidebar.header("1. データを読み込む")
@@ -793,6 +847,9 @@ def main() -> None:
         if search_point is not None:
             show_df = filter_within_radius(df, search_point, float(radius_km))
 
+    # ①対策：一覧のクリック選択状態を、地図描画前に反映
+    sync_selected_pin_from_list_table(show_df)
+
     # ---- ステータス
     st.markdown(
         _status_bar_html(
@@ -812,10 +869,29 @@ def main() -> None:
     # ---- レイアウト
     col_map, col_list = st.columns([5, 2], gap="large")
 
-    # ★変更：選択した薬局があっても「ズームしない」
     highlight_uid = st.session_state.selected_pin_uid
-    center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
-    zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
+
+    # ②&④：中心/ズームの決定ロジック
+    focus_center: Optional[SearchPoint] = None
+    focus_radius_km: Optional[float] = None
+
+    if highlight_uid:
+        row = show_df[show_df["UID"].astype(str) == str(highlight_uid)]
+        if not row.empty:
+            focus_center = SearchPoint(lat=float(row.iloc[0]["緯度"]), lon=float(row.iloc[0]["経度"]))
+            focus_radius_km = FOCUS_RADIUS_KM
+            center = (focus_center.lat, focus_center.lon)
+            zoom = FOCUS_ZOOM
+            st.session_state.map_view_center = center
+            st.session_state.map_view_zoom = zoom
+        else:
+            center = st.session_state.map_view_center or (float(df["緯度"].mean()), float(df["経度"].mean()))
+            zoom = st.session_state.map_view_zoom or (11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8)
+    else:
+        default_center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+        default_zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
+        center = st.session_state.map_view_center or default_center
+        zoom = st.session_state.map_view_zoom or default_zoom
 
     # ---- 地図
     with col_map:
@@ -826,12 +902,14 @@ def main() -> None:
             points = prepare_points_for_map(show_df)
             fmap = build_map(
                 center=center,
-                zoom=zoom,
+                zoom=int(zoom),
                 points=points,
                 search_point=search_point,
                 radius_km=None if mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} else float(radius_km),
                 pending_point=pending_point,
                 highlight_uid=highlight_uid,
+                focus_circle_center=focus_center,
+                focus_circle_radius_km=focus_radius_km,
             )
             add_map_loading_overlay(fmap, "検索中・・・地図を読み込み中です")
 
@@ -839,9 +917,20 @@ def main() -> None:
                 fmap,
                 width=None,
                 height=820,
-                returned_objects=["last_clicked"],
+                returned_objects=["last_clicked", "center", "zoom"],
                 key="map",
             )
+
+        if map_data:
+            c = map_data.get("center")
+            z = map_data.get("zoom")
+            if c and "lat" in c and "lng" in c:
+                st.session_state.map_view_center = (float(c["lat"]), float(c["lng"]))
+            if z is not None:
+                try:
+                    st.session_state.map_view_zoom = int(z)
+                except Exception:
+                    pass
 
         if search_mode == "地図をクリックして指定（半径指定）":
             clicked = (map_data or {}).get("last_clicked")
@@ -856,7 +945,7 @@ def main() -> None:
                     st.session_state.pending_point = None
                     st.session_state.selected_pin_uid = None
 
-    # ---- 一覧（ボタン廃止：表クリックで強調 / Excelは別タブで整理）
+    # ---- 一覧
     with col_list:
         st.subheader("一覧")
         if show_df.empty:
@@ -865,15 +954,13 @@ def main() -> None:
 
         tab_list, tab_export = st.tabs(["一覧（クリックで地図で強調）", "Excel出力（☑で選択）"])
 
-        # --- 一覧タブ：行クリックで selected_pin_uid 更新
         with tab_list:
-            st.caption("行をクリックすると、地図上の該当ピンだけ赤で強調します（ズームはしません）。")
+            st.caption("行をクリックすると、地図上の該当ピンを赤で強調し、2km圏内へズームします。")
 
             list_view = show_df[["UID", "薬局名", "法人名", "住所"]].copy().reset_index(drop=True)
 
-            # st.dataframe の選択イベント（Streamlitのバージョンによっては未対応の場合あり）
             try:
-                ev = st.dataframe(
+                st.dataframe(
                     list_view.drop(columns=["UID"]),
                     use_container_width=True,
                     height=520,
@@ -882,29 +969,19 @@ def main() -> None:
                     selection_mode="single-row",
                     key="list_click_df",
                 )
-                if ev is not None and hasattr(ev, "selection"):
-                    rows = (ev.selection or {}).get("rows", [])
-                    if rows:
-                        idx = int(rows[0])
-                        uid = str(list_view.iloc[idx]["UID"])
-                        st.session_state.selected_pin_uid = uid
             except TypeError:
-                # 古いStreamlitの場合：選択イベントが使えないのでメッセージを出す
                 st.info("この環境のStreamlitでは『行クリック選択』が使えません。必要ならStreamlitの更新をご検討ください。")
 
-            # 強調解除
             c1, c2 = st.columns([1, 1])
             with c1:
                 if st.button("地図の強調を解除"):
                     st.session_state.selected_pin_uid = None
-
             with c2:
                 if highlight_uid:
                     st.write("強調中：1件")
 
-        # --- Excel出力タブ：☑で選択
         with tab_export:
-            st.caption("☑で選択すると、下からExcelをダウンロードできます。")
+            st.caption("☑で複数選択できます。選択した薬局は下からExcelダウンロードできます。")
             view = add_link_columns(show_df).reset_index(drop=True)
 
             cols = ["☑", "薬局名", "法人名", "住所", "Googleマップ", "管理薬剤師求人", "常勤求人", "パート求人", "派遣求人", "契約社員"]
