@@ -26,6 +26,12 @@
 ⑦ 駅名検索を安定させる改修
    - 住所/駅名の候補が複数取れた場合、「薬局データの中心に最も近い候補」を採用
 
+【追加要望（今回反映）】
+⑧ 「PC上のファイルパスを指定」を削除
+⑨ file_uploader の英語メッセージを日本語化（CSS）
+⑩ 参照ファイルのパスをテキスト表示
+⑪ 参照ファイルを file:// リンクとして表示（環境によっては開けない）
+
 """
 
 from __future__ import annotations
@@ -57,10 +63,14 @@ except Exception:
 # =============================================================================
 # 設定
 # =============================================================================
-DEFAULT_LOCAL_FILE = r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索\東北 薬局リスト.xlsm"
-
 JOB_BASE_URL = "https://yaku-job.com/preview/"
 GOOGLE_MAPS_QUERY_URL = "https://www.google.com/maps/search/?api=1&query={lat},{lon}"
+
+# 参照ファイル（表示用）
+REFERENCE_FILES = {
+    "東北エリア": r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索\東北 薬局リスト.xlsm",
+    "北海道エリア": r"\\file-tky\Section\薬剤師共有\★【支店・課】_北海道\北海道\薬局検索\北海道 薬局リスト.xlsm",
+}
 
 # Excel列（0-based index）
 # C=2, E=4, I=8, K=10, L=11, M=12, N=13, O=14, P=15, Q=16
@@ -115,7 +125,6 @@ def _normalize_id(x) -> Optional[str]:
     s = str(x).strip()
     if not s or s.lower() in {"nan", "none"}:
         return None
-    # 123.0 -> 123
     if s.endswith(".0"):
         s2 = s[:-2]
         if s2.isdigit():
@@ -183,7 +192,6 @@ def extract_ceo_name_from_opener(opener_raw: str) -> str:
         return ""
     name_part = (m.group(2) or "").strip()
 
-    # 保険：先頭の肩書が混ざるケースを軽く除去
     for prefix in ["社長", "会長", "CEO", "ＣＥＯ"]:
         if name_part.startswith(prefix):
             name_part = name_part[len(prefix):].strip()
@@ -225,11 +233,13 @@ def _apply_ui_css() -> None:
         div[data-testid="stFileUploaderDropzone"] p { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] small { display:none !important; }
 
+        /* Drag and drop メッセージを日本語で表示 */
         div[data-testid="stFileUploaderDropzone"]::before{
             content:"ここにExcelファイルをドラッグ＆ドロップ、または「ファイルを選択」を押してください";
             display:block;
             padding:0.25rem 0 0.6rem 0;
             font-size:0.95rem;
+            font-weight:600;
             color:rgba(49,51,63,0.9);
         }
 
@@ -275,12 +285,10 @@ def load_pharmacy_data(file_bytes: bytes) -> pd.DataFrame:
 
     records: List[Dict[str, Any]] = []
 
-    # enumerate(..., start=2) で Excelの行番号（ヘッダ1行目の次）を保持
     for excel_row_no, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
         lat = _safe_float(row[COL["lat"]] if len(row) > COL["lat"] else None)
         lon = _safe_float(row[COL["lon"]] if len(row) > COL["lon"] else None)
 
-        # 緯度・経度が空の薬局は表示しない
         if lat is None or lon is None:
             continue
 
@@ -295,14 +303,13 @@ def load_pharmacy_data(file_bytes: bytes) -> pd.DataFrame:
 
         records.append(
             {
-                # 一意ID（Excel行番号をそのまま使う）
                 "UID": str(excel_row_no),
                 "Excel行番号": int(excel_row_no),
 
                 "薬局名": str(pharmacy_name).strip() if pharmacy_name is not None else "",
-                "開設者氏名": opener_str,        # E列全文（表示用）
-                "法人名": corp_name,             # 法人名（抽出）
-                "社長名": ceo_name,              # 氏名（抽出）
+                "開設者氏名": opener_str,
+                "法人名": corp_name,
+                "社長名": ceo_name,
 
                 "法人検索キー": corporation_search_key_from_opener(opener_str),
                 "社長検索キー": ceo_search_key_from_opener(opener_str),
@@ -398,14 +405,8 @@ def add_map_loading_overlay(m: folium.Map, message: str = "検索中・・・地
 # 地図：ピンのポップアップ
 # =============================================================================
 def _make_popup_html(r: pd.Series) -> str:
-    """
-    ピンのクリック時に表示する内容をHTMLで作成。
-
-    - 「法人名:（抽出法人名）」行は削除
-    - 「開設者氏名:」ラベルを「法人名:」に変更（表示内容はE列全文のまま）
-    """
     name = _escape_html(str(r.get("薬局名", "")))
-    opener_full = _escape_html(str(r.get("開設者氏名", "")))  # E列全文
+    opener_full = _escape_html(str(r.get("開設者氏名", "")))
     addr = _escape_html(str(r.get("住所", "")))
 
     lat = float(r["緯度"])
@@ -443,7 +444,6 @@ def _make_popup_html(r: pd.Series) -> str:
 
 @st.cache_data(show_spinner=False)
 def prepare_points_for_map(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """地図表示に必要な最小情報を作る（キャッシュ対象）。"""
     pts: List[Dict[str, Any]] = []
     for _, r in df.iterrows():
         pts.append(
@@ -465,10 +465,8 @@ def build_map(
     radius_km: Optional[float],
     pending_point: Optional[SearchPoint],
 ) -> folium.Map:
-    """Folium地図を構築（薬局=青ピン、検索地点=赤ピン、未確定=橙ピン）。"""
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
 
-    # 未確定クリック地点（橙）
     if pending_point is not None:
         folium.Marker(
             location=(pending_point.lat, pending_point.lon),
@@ -476,7 +474,6 @@ def build_map(
             icon=folium.Icon(color="orange", icon="map-marker"),
         ).add_to(m)
 
-    # 確定検索地点（赤）+ 円（半径検索のとき）
     if search_point is not None:
         sp_html = f"""
         <div style="font-size:13px;line-height:1.4;">
@@ -504,7 +501,6 @@ def build_map(
                 weight=2,
             ).add_to(m)
 
-    # 薬局（青）をクラスタ表示
     cluster = MarkerCluster(name="薬局").add_to(m)
     for p in points:
         folium.Marker(
@@ -540,10 +536,6 @@ def _address_candidates(address: str) -> List[str]:
 
 
 def geocode_address(address: str, bias_df: Optional[pd.DataFrame] = None) -> Optional[SearchPoint]:
-    """
-    住所・駅名から緯度経度を取得する。
-    ★駅名などの曖昧入力対策：候補が複数取れた場合、bias_df（薬局データ）の中心に最も近い候補を採用する。
-    """
     if not address.strip():
         return None
     if Nominatim is None or ArcGIS is None or RateLimiter is None:
@@ -569,11 +561,9 @@ def geocode_address(address: str, bias_df: Optional[pd.DataFrame] = None) -> Opt
     if not candidates:
         return None
 
-    # bias無しなら先頭
     if bias_df is None or bias_df.empty:
         return candidates[0]
 
-    # 薬局データ中心に一番近い候補を採用（駅名の誤ヒット対策）
     c_lat = float(bias_df["緯度"].mean())
     c_lon = float(bias_df["経度"].mean())
     best = min(candidates, key=lambda sp: _haversine_km(sp.lat, sp.lon, c_lat, c_lon))
@@ -584,7 +574,6 @@ def geocode_address(address: str, bias_df: Optional[pd.DataFrame] = None) -> Opt
 # フィルタ＆一覧リンク
 # =============================================================================
 def filter_within_radius(df: pd.DataFrame, center: SearchPoint, radius_km: float) -> pd.DataFrame:
-    """検索地点から半径内の薬局だけに絞り、距離順で返す。"""
     dists: List[float] = []
     for _, r in df.iterrows():
         dists.append(_haversine_km(center.lat, center.lon, float(r["緯度"]), float(r["経度"])))
@@ -596,7 +585,6 @@ def filter_within_radius(df: pd.DataFrame, center: SearchPoint, radius_km: float
 
 
 def filter_by_corporation(df: pd.DataFrame, corp_query_raw: str) -> pd.DataFrame:
-    """法人名検索（完全一致 / スペース無視）。"""
     q = normalize_space_ignored(corp_query_raw)
     if not q:
         return df.iloc[0:0].copy()
@@ -604,7 +592,6 @@ def filter_by_corporation(df: pd.DataFrame, corp_query_raw: str) -> pd.DataFrame
 
 
 def filter_by_ceo_name(df: pd.DataFrame, ceo_query_raw: str) -> pd.DataFrame:
-    """社長名検索（完全一致 / 苗字・名前の間のスペース無視）。"""
     q = normalize_space_ignored(ceo_query_raw)
     if not q:
         return df.iloc[0:0].copy()
@@ -612,7 +599,6 @@ def filter_by_ceo_name(df: pd.DataFrame, ceo_query_raw: str) -> pd.DataFrame:
 
 
 def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """一覧表示用リンク列を作る（管理薬剤師求人URLを追加）。"""
     out = df.copy()
 
     out["Googleマップ"] = out.apply(
@@ -632,7 +618,6 @@ def add_link_columns(df: pd.DataFrame) -> pd.DataFrame:
 # 選択データのExcel出力
 # =============================================================================
 def build_selected_excel_bytes(selected_df: pd.DataFrame) -> bytes:
-    """選択された薬局（薬局名・法人名・住所）を .xlsx として出力する。"""
     out_cols = ["薬局名", "法人名", "住所"]
     export_df = selected_df[out_cols].copy()
 
@@ -696,7 +681,7 @@ def main() -> None:
     st.caption("手順：1) Excelを読み込む → 2) 検索方法を選ぶ → 3) 地図と一覧で確認 → 4) ☑で選択しExcel出力")
 
     # -----------------------------
-    # セッション状態（永続化したい値）
+    # セッション状態
     # -----------------------------
     if "clicked_point" not in st.session_state:
         st.session_state.clicked_point = None
@@ -710,7 +695,6 @@ def main() -> None:
     if "selected_uids" not in st.session_state:
         st.session_state.selected_uids = set()
 
-    # ★ data_editor の状態保持（一覧用）
     if "list_editor_df" not in st.session_state:
         st.session_state.list_editor_df = None
     if "list_editor_uids" not in st.session_state:
@@ -721,32 +705,30 @@ def main() -> None:
     # -------------------------------------------------------------------------
     st.sidebar.header("1. データを読み込む")
 
-    load_mode = st.sidebar.radio(
-        "読み込み方法",
-        ["Excelをアップロード", "PC上のファイルパスを指定"],
-        index=0,
+    st.sidebar.write("Excelファイルを選択してください。")
+    uploaded = st.sidebar.file_uploader(
+        "Excelファイル",
+        type=["xlsm", "xlsx"],
+        label_visibility="collapsed",
     )
 
     file_bytes: Optional[bytes] = None
+    if uploaded is not None:
+        file_bytes = uploaded.getvalue()
 
-    if load_mode == "Excelをアップロード":
-        st.sidebar.write("Excelファイルを選択してください。")
-        uploaded = st.sidebar.file_uploader(
-            "Excelファイル",
-            type=["xlsm", "xlsx"],
-            label_visibility="collapsed",
+    # 参照ファイル表示（テキスト＋file://リンク）
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("★参照ファイル")
+
+    for area, path in REFERENCE_FILES.items():
+        st.sidebar.markdown(f"**【{area}】**")
+        st.sidebar.code(path, language="text")
+
+        file_url = "file:///" + path.replace("\\", "/")
+        st.sidebar.markdown(
+            f'<a href="{file_url}" target="_blank">この参照ファイルを開く</a>',
+            unsafe_allow_html=True,
         )
-        if uploaded is not None:
-            file_bytes = uploaded.getvalue()
-    else:
-        import os
-        path = st.sidebar.text_input("ファイルパス", value=DEFAULT_LOCAL_FILE)
-        if st.sidebar.button("このファイルを読み込む"):
-            if not os.path.exists(path):
-                st.sidebar.error("指定したパスにファイルが見つかりません。")
-            else:
-                with open(path, "rb") as f:
-                    file_bytes = f.read()
 
     if file_bytes is None:
         st.info("左の「1. データを読み込む」からExcelを読み込んでください。")
@@ -788,7 +770,6 @@ def main() -> None:
         address = st.sidebar.text_input("住所・駅名", value="")
         if st.sidebar.button("この住所で検索"):
             with st.spinner("住所・駅名から緯度・経度を取得しています..."):
-                # ★改修：薬局データ中心に近い候補を採用するため df を渡す
                 sp = geocode_address(address, bias_df=df)
 
             if sp is None:
@@ -879,7 +860,6 @@ def main() -> None:
     # -------------------------------------------------------------------------
     col_map, col_list = st.columns([5, 2], gap="large")
 
-    # 地図中心
     if not show_df.empty:
         center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean()))
     else:
@@ -970,21 +950,17 @@ def main() -> None:
         if view.empty:
             st.info("表示対象がありません。")
         else:
-            # 表示中のUID（行対応のキー）
             display_uids = view["UID"].astype(str).tolist()
 
-            # editor用のベース表（毎回組み立てる）
             base = view.drop(columns=["☑"], errors="ignore").copy()
             base.insert(0, "☑", [uid in st.session_state.selected_uids for uid in display_uids])
             base = base[cols].copy()
 
-            # ★表示対象UIDが変わったら editor をリセットしてから差し替え
             if (st.session_state.list_editor_df is None) or (st.session_state.list_editor_uids != display_uids):
                 st.session_state.list_editor_df = base
                 st.session_state.list_editor_uids = display_uids
-                st.session_state.pop("list_editor", None)  # widget内部状態の破棄
+                st.session_state.pop("list_editor", None)
 
-            # ★重要：data_editor に渡す DataFrame は固定（list_editor_df）
             edited = st.data_editor(
                 st.session_state.list_editor_df,
                 use_container_width=True,
@@ -1002,21 +978,14 @@ def main() -> None:
                 key="list_editor",
             )
 
-            # ★重要：ここで list_editor_df を edited で上書きしない（1回目消える原因になりがち）
-            # st.session_state.list_editor_df = edited  # ←しない
-
-            # ★チェック結果を selected_uids に反映（indexズレに依存しない）
             uids_for_zip = st.session_state.list_editor_uids
             checked_uids = {uid for uid, checked in zip(uids_for_zip, edited["☑"].tolist()) if checked}
 
             selected = set(st.session_state.selected_uids)
-            selected -= set(uids_for_zip)   # 表示中ぶんを一旦除外
-            selected |= checked_uids        # 表示中のチェック分を反映
+            selected -= set(uids_for_zip)
+            selected |= checked_uids
             st.session_state.selected_uids = selected
 
-        # -----------------------------
-        # 選択結果のExcel出力
-        # -----------------------------
         st.markdown("---")
         c1, c2 = st.columns([1, 1])
         with c1:
