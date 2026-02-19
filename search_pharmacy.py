@@ -13,6 +13,7 @@
    - 地図をクリックして指定（半径指定 / 確実）
    - 法人で検索（E列から法人名部分だけ抽出 + スペース無視で完全一致）
    - 社長名で検索（E列から「氏名」部分だけ抽出 + スペース無視で完全一致）
+   - ★薬局で検索（薬局名部分一致 + 都道府県プルダウン）
 
 【反映済みの要望】
 ① 検索のデフォルトを「住所・駅名で検索」に
@@ -30,10 +31,10 @@
 ⑧ 「PC上のファイルパスを指定」を削除
 ⑨ Drag and drop file here を日本語に
 ⑩ Browse files を日本語化
-⑪ 参照フォルダパスをテキスト表示
+⑪ 参照フォルダパスをテキスト表示（未読み込み時のみ）
 ⑫ パスのコピーボタン設置（Streamlit Cloudで動作）
 ⑬ フォルダ内のリスト一覧をテキスト表示（Cloudでは実参照不可なので手動定義）
-
+⑭ ★一覧の薬局名をボタン化してクリックでズームイン＋ピン強調（赤）
 """
 
 from __future__ import annotations
@@ -76,6 +77,9 @@ REFERENCE_FILE_LIST = [
     "東北 薬局リスト.xlsm",
     "北海道 薬局リスト.xlsm",
 ]
+
+# ★薬局検索用：都道府県リスト
+PREF_LIST = ["", "北海道", "青森", "秋田", "岩手", "宮城", "山形", "福島"]
 
 # Excel列（0-based index）
 # C=2, E=4, I=8, K=10, L=11, M=12, N=13, O=14, P=15, Q=16
@@ -443,6 +447,7 @@ def prepare_points_for_map(df: pd.DataFrame) -> List[Dict[str, Any]]:
     for _, r in df.iterrows():
         pts.append(
             {
+                "uid": str(r.get("UID", "")),
                 "lat": float(r["緯度"]),
                 "lon": float(r["経度"]),
                 "tooltip": str(r.get("薬局名", "")),
@@ -452,6 +457,25 @@ def prepare_points_for_map(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return pts
 
 
+# =============================================================================
+# ★追加：薬局検索（部分一致 + 都道府県絞り込み）
+# =============================================================================
+def filter_by_pharmacy(df: pd.DataFrame, name_query: str, pref: str) -> pd.DataFrame:
+    out = df.copy()
+
+    q = (name_query or "").strip()
+    if q:
+        out = out[out["薬局名"].str.contains(q, na=False)]
+
+    if pref:
+        out = out[out["住所"].str.contains(pref, na=False)]
+
+    return out.copy()
+
+
+# =============================================================================
+# 地図構築（強調UID対応）
+# =============================================================================
 def build_map(
     center: Tuple[float, float],
     zoom: int,
@@ -459,6 +483,7 @@ def build_map(
     search_point: Optional[SearchPoint],
     radius_km: Optional[float],
     pending_point: Optional[SearchPoint],
+    highlight_uid: Optional[str] = None,  # ★追加
 ) -> folium.Map:
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
 
@@ -497,12 +522,19 @@ def build_map(
             ).add_to(m)
 
     cluster = MarkerCluster(name="薬局").add_to(m)
+
     for p in points:
+        uid = str(p.get("uid", ""))
+        is_highlight = (highlight_uid is not None and uid == str(highlight_uid))
+
+        icon_color = "red" if is_highlight else "blue"
+        icon_name = "star" if is_highlight else "info-sign"
+
         folium.Marker(
             location=(p["lat"], p["lon"]),
             tooltip=p["tooltip"],
             popup=folium.Popup(p["popup_html"], max_width=480),
-            icon=folium.Icon(color="blue", icon="info-sign"),
+            icon=folium.Icon(color=icon_color, icon=icon_name),
         ).add_to(cluster)
 
     folium.LayerControl().add_to(m)
@@ -633,6 +665,8 @@ def _status_bar_html(
     sp: Optional[SearchPoint],
     corp_query: Optional[str],
     ceo_query: Optional[str],
+    pharmacy_query: Optional[str],
+    pref_query: Optional[str,
 ) -> str:
     if mode_label == "法人で検索":
         q = _escape_html(corp_query or "")
@@ -640,6 +674,57 @@ def _status_bar_html(
     elif mode_label == "社長名で検索":
         q = _escape_html(ceo_query or "")
         detail = f"<b>社長名検索</b>：{q}（スペース無視で完全一致）"
+    elif mode_label == "薬局で検索":
+        q = _escape_html(pharmacy_query or "")
+        p = _escape_html(pref_query or "")
+        detail = f"<b>薬局名</b>：{q}&nbsp;&nbsp;&nbsp;<b>都道府県</b>：{p if p else '（指定なし）'}"
+    else:
+        sp_text = "（未指定）" if sp is None else f"緯度 {sp.lat:.5f} / 経度 {sp.lon:.5f}"
+        r = "" if radius_km is None else f"<b>半径 {radius_km:.1f} km 以内</b>"
+        detail = f"{r}&nbsp;&nbsp;&nbsp;<b>検索点</b>：{sp_text}"
+
+    return f"""
+    <div style="
+        background:#E8F5E9;
+        border:1px solid rgba(0,0,0,0.06);
+        padding:10px 12px;
+        border-radius:10px;
+        font-size:14px;
+        display:flex;
+        gap:18px;
+        flex-wrap:wrap;
+        align-items:center;
+    ">
+      <div><b>読み込み完了</b>：{total:,}件（緯度・経度あり）</div>
+      <div><b>検索モード</b>：{mode_label}</div>
+      <div>{detail}</div>
+      <div><b>表示件数</b>：{shown:,}件</div>
+    </div>
+    """
+# =============================================================================
+# 上部ステータス帯（★後半で正しい定義を上書き）
+# =============================================================================
+def _status_bar_html(
+    total: int,
+    shown: int,
+    mode_label: str,
+    radius_km: Optional[float],
+    sp: Optional[SearchPoint],
+    corp_query: Optional[str],
+    ceo_query: Optional[str],
+    pharmacy_query: Optional[str],
+    pref_query: Optional[str],
+) -> str:
+    if mode_label == "法人で検索":
+        q = _escape_html(corp_query or "")
+        detail = f"<b>法人検索</b>：{q}"
+    elif mode_label == "社長名で検索":
+        q = _escape_html(ceo_query or "")
+        detail = f"<b>社長名検索</b>：{q}（スペース無視で完全一致）"
+    elif mode_label == "薬局で検索":
+        q = _escape_html(pharmacy_query or "")
+        p = _escape_html(pref_query or "")
+        detail = f"<b>薬局名</b>：{q}&nbsp;&nbsp;&nbsp;<b>都道府県</b>：{p if p else '（指定なし）'}"
     else:
         sp_text = "（未指定）" if sp is None else f"緯度 {sp.lat:.5f} / 経度 {sp.lon:.5f}"
         r = "" if radius_km is None else f"<b>半径 {radius_km:.1f} km 以内</b>"
@@ -676,7 +761,7 @@ def main() -> None:
     st.caption("手順：1) Excelを読み込む → 2) 検索方法を選ぶ → 3) 地図と一覧で確認 → 4) ☑で選択しExcel出力")
 
     # -----------------------------
-    # セッション状態
+    # セッション状態（永続化したい値）
     # -----------------------------
     if "clicked_point" not in st.session_state:
         st.session_state.clicked_point = None
@@ -687,9 +772,20 @@ def main() -> None:
     if "ceo_query_raw" not in st.session_state:
         st.session_state.ceo_query_raw = ""
 
+    # ★追加：薬局検索入力保持
+    if "pharmacy_query_raw" not in st.session_state:
+        st.session_state.pharmacy_query_raw = ""
+    if "pref_query" not in st.session_state:
+        st.session_state.pref_query = ""
+
+    # ★追加：一覧クリックで選んだ薬局（ズーム＆強調）
+    if "selected_pin_uid" not in st.session_state:
+        st.session_state.selected_pin_uid = None
+
     if "selected_uids" not in st.session_state:
         st.session_state.selected_uids = set()
 
+    # ★ data_editor の状態保持（一覧用）
     if "list_editor_df" not in st.session_state:
         st.session_state.list_editor_df = None
     if "list_editor_uids" not in st.session_state:
@@ -711,39 +807,33 @@ def main() -> None:
     if uploaded is not None:
         file_bytes = uploaded.getvalue()
 
-    # -------------------------------------------------------------------------
-    # 参照フォルダ（Cloud対応：表示とコピーのみ）
-    # -------------------------------------------------------------------------
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("★参照フォルダ")
-
-    st.sidebar.code(REFERENCE_FOLDER, language="text")
-
-    escaped_path = REFERENCE_FOLDER.replace("\\", "\\\\")
-    st.sidebar.markdown(
-        f"""
-        <button onclick="navigator.clipboard.writeText('{escaped_path}')"
-        style="
-            background-color:#f0f2f6;
-            border:1px solid #ccc;
-            padding:6px 10px;
-            border-radius:6px;
-            cursor:pointer;
-            font-size:13px;">
-            フォルダのパスをコピー
-        </button>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.sidebar.markdown("★リスト一覧")
-    for f in REFERENCE_FILE_LIST:
-        st.sidebar.write(f"・{f}")
-
-    # -------------------------------------------------------------------------
-    # Excel読み込みが無い場合は終了
-    # -------------------------------------------------------------------------
+    # ★要望①：Excel未読み込み時のみ、参照フォルダ／リストを表示（読み込み後は非表示）
     if file_bytes is None:
+        st.sidebar.markdown("---")
+        st.sidebar.markdown("★参照フォルダ（表示のみ）")
+        st.sidebar.code(REFERENCE_FOLDER, language="text")
+
+        escaped_path = REFERENCE_FOLDER.replace("\\", "\\\\")
+        st.sidebar.markdown(
+            f"""
+            <button onclick="navigator.clipboard.writeText('{escaped_path}')"
+            style="
+                background-color:#f0f2f6;
+                border:1px solid #ccc;
+                padding:6px 10px;
+                border-radius:6px;
+                cursor:pointer;
+                font-size:13px;">
+                フォルダのパスをコピー
+            </button>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.sidebar.markdown("★リスト一覧（Cloudでは手動定義）")
+        for f in REFERENCE_FILE_LIST:
+            st.sidebar.write(f"・{f}")
+
         st.info("左の「1. データを読み込む」からExcelを読み込んでください。")
         st.stop()
 
@@ -765,6 +855,7 @@ def main() -> None:
             "地図をクリックして指定（半径指定）",
             "法人で検索",
             "社長名で検索",
+            "薬局で検索",  # ★追加
         ],
         index=0,
     )
@@ -775,9 +866,10 @@ def main() -> None:
         max_value=200.0,
         value=2.0,
         step=0.5,
-        disabled=(search_mode in {"法人で検索", "社長名で検索"}),
+        disabled=(search_mode in {"法人で検索", "社長名で検索", "薬局で検索"}),
     )
 
+    # 検索モードごとのUI＆状態更新
     if search_mode == "住所・駅名で検索（半径指定）":
         st.sidebar.caption("例：宮城県仙台市青葉区中央1-1-1 / 仙台駅")
         address = st.sidebar.text_input("住所・駅名", value="")
@@ -786,12 +878,15 @@ def main() -> None:
                 sp = geocode_address(address, bias_df=df)
 
             if sp is None:
-                st.warning("位置情報を取得できませんでした（社内ネットワーク等でブロックの可能性）。")
+                st.warning("位置情報を取得できませんでした（ネットワーク制限の可能性）。")
             else:
                 st.session_state.clicked_point = sp
                 st.session_state.pending_point = None
                 st.session_state.corp_query_raw = ""
                 st.session_state.ceo_query_raw = ""
+                st.session_state.pharmacy_query_raw = ""
+                st.session_state.pref_query = ""
+                st.session_state.selected_pin_uid = None
 
     elif search_mode == "地図をクリックして指定（半径指定）":
         if st.sidebar.button("検索地点の確定を解除（全件表示）"):
@@ -799,22 +894,28 @@ def main() -> None:
             st.session_state.pending_point = None
             st.session_state.corp_query_raw = ""
             st.session_state.ceo_query_raw = ""
+            st.session_state.pharmacy_query_raw = ""
+            st.session_state.pref_query = ""
+            st.session_state.selected_pin_uid = None
 
     elif search_mode == "法人で検索":
         st.sidebar.caption("E列から「代表取締役」の前までを法人名として検索します（スペース無視・完全一致）")
         corp_raw = st.sidebar.text_input("法人名", value=st.session_state.corp_query_raw)
         c1, c2 = st.sidebar.columns(2)
         with c1:
-            if st.button("この法人で検索"):
+            if st.sidebar.button("この法人で検索"):
                 st.session_state.corp_query_raw = corp_raw
                 st.session_state.clicked_point = None
                 st.session_state.pending_point = None
                 st.session_state.ceo_query_raw = ""
+                st.session_state.pharmacy_query_raw = ""
+                st.session_state.pref_query = ""
+                st.session_state.selected_pin_uid = None
         with c2:
-            if st.button("解除"):
+            if st.sidebar.button("解除"):
                 st.session_state.corp_query_raw = ""
 
-    else:
+    elif search_mode == "社長名で検索":
         st.sidebar.caption("E列の「代表取締役」の後ろを氏名として検索します（スペース無視・完全一致）")
         st.sidebar.caption("例：神林明仁（推奨） / 神林 明仁（空白は自動で無視）")
         ceo_raw = st.sidebar.text_input("社長名（苗字+名前）", value=st.session_state.ceo_query_raw)
@@ -825,15 +926,41 @@ def main() -> None:
                 st.session_state.clicked_point = None
                 st.session_state.pending_point = None
                 st.session_state.corp_query_raw = ""
+                st.session_state.pharmacy_query_raw = ""
+                st.session_state.pref_query = ""
+                st.session_state.selected_pin_uid = None
         with c2:
             if st.sidebar.button("解除"):
                 st.session_state.ceo_query_raw = ""
+
+    else:
+        # ★追加：薬局で検索（部分一致 + 都道府県）
+        st.sidebar.caption("薬局名は部分一致で検索できます。都道府県で絞り込みも可能です。")
+        name_q = st.sidebar.text_input("薬局名（部分一致）", value=st.session_state.pharmacy_query_raw)
+        pref_q = st.sidebar.selectbox("都道府県", PREF_LIST, index=PREF_LIST.index(st.session_state.pref_query) if st.session_state.pref_query in PREF_LIST else 0)
+
+        c1, c2 = st.sidebar.columns(2)
+        with c1:
+            if st.sidebar.button("この条件で検索"):
+                st.session_state.pharmacy_query_raw = name_q
+                st.session_state.pref_query = pref_q
+                st.session_state.clicked_point = None
+                st.session_state.pending_point = None
+                st.session_state.corp_query_raw = ""
+                st.session_state.ceo_query_raw = ""
+                st.session_state.selected_pin_uid = None
+        with c2:
+            if st.sidebar.button("解除"):
+                st.session_state.pharmacy_query_raw = ""
+                st.session_state.pref_query = ""
 
     # -------------------------------------------------------------------------
     # 絞り込み
     # -------------------------------------------------------------------------
     corp_query_raw = st.session_state.corp_query_raw.strip()
     ceo_query_raw = st.session_state.ceo_query_raw.strip()
+    pharmacy_query_raw = st.session_state.pharmacy_query_raw.strip()
+    pref_query = (st.session_state.pref_query or "").strip()
 
     if search_mode == "法人で検索":
         show_df = filter_by_corporation(df, corp_query_raw) if corp_query_raw else df.iloc[0:0].copy()
@@ -844,6 +971,11 @@ def main() -> None:
         show_df = filter_by_ceo_name(df, ceo_query_raw) if ceo_query_raw else df.iloc[0:0].copy()
         search_point = None
         mode_label = "社長名で検索"
+
+    elif search_mode == "薬局で検索":
+        show_df = filter_by_pharmacy(df, pharmacy_query_raw, pref_query) if (pharmacy_query_raw or pref_query) else df.iloc[0:0].copy()
+        search_point = None
+        mode_label = "薬局で検索"
 
     else:
         search_point = st.session_state.clicked_point
@@ -860,10 +992,12 @@ def main() -> None:
             total=len(df),
             shown=len(show_df),
             mode_label=mode_label,
-            radius_km=(None if mode_label in {"法人で検索", "社長名で検索"} else float(radius_km)),
+            radius_km=(None if mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} else float(radius_km)),
             sp=search_point,
             corp_query=(corp_query_raw if mode_label == "法人で検索" else None),
             ceo_query=(ceo_query_raw if mode_label == "社長名で検索" else None),
+            pharmacy_query=(pharmacy_query_raw if mode_label == "薬局で検索" else None),
+            pref_query=(pref_query if mode_label == "薬局で検索" else None),
         ),
         unsafe_allow_html=True,
     )
@@ -873,11 +1007,19 @@ def main() -> None:
     # -------------------------------------------------------------------------
     col_map, col_list = st.columns([5, 2], gap="large")
 
-    if not show_df.empty:
-        center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean()))
+    # ★追加：一覧クリック選択がある場合は、その地点にズーム
+    highlight_uid = st.session_state.selected_pin_uid
+    if highlight_uid:
+        row = df[df["UID"].astype(str) == str(highlight_uid)]
+        if not row.empty:
+            center = (float(row.iloc[0]["緯度"]), float(row.iloc[0]["経度"]))
+            zoom = 15
+        else:
+            center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+            zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
     else:
-        center = (float(df["緯度"].mean()), float(df["経度"].mean()))
-    zoom = 11 if (mode_label in {"法人で検索", "社長名で検索"} or search_point is not None) else 8
+        center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+        zoom = 11 if (mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} or search_point is not None) else 8
 
     # -------------------------------------------------------------------------
     # 地図
@@ -895,8 +1037,9 @@ def main() -> None:
                 zoom=zoom,
                 points=points,
                 search_point=search_point,
-                radius_km=(None if mode_label in {"法人で検索", "社長名で検索"} else float(radius_km)),
+                radius_km=(None if mode_label in {"法人で検索", "社長名で検索", "薬局で検索"} else float(radius_km)),
                 pending_point=pending_point,
+                highlight_uid=highlight_uid,  # ★追加：強調
             )
 
             add_map_loading_overlay(fmap, "検索中・・・地図を読み込み中です")
@@ -925,6 +1068,9 @@ def main() -> None:
                     st.session_state.pending_point = None
                     st.session_state.corp_query_raw = ""
                     st.session_state.ceo_query_raw = ""
+                    st.session_state.pharmacy_query_raw = ""
+                    st.session_state.pref_query = ""
+                    st.session_state.selected_pin_uid = None
 
         if mode_label == "法人で検索" and corp_query_raw and show_df.empty:
             st.warning(
@@ -939,11 +1085,39 @@ def main() -> None:
                 "※E列に「代表取締役」が無い行は社長名検索の対象外になります。"
             )
 
+        if mode_label == "薬局で検索" and (pharmacy_query_raw or pref_query) and show_df.empty:
+            st.warning("一致する薬局が見つかりませんでした。")
+
     # -------------------------------------------------------------------------
-    # 一覧（☑チェック + Excel出力）
+    # 一覧（★ボタン化 + ☑チェック + Excel出力）
     # -------------------------------------------------------------------------
     with col_list:
         st.subheader("一覧")
+
+        # ★まず：薬局名ボタンリスト（クリックでズーム＆強調）
+        if show_df.empty:
+            st.info("表示対象がありません。")
+        else:
+            st.caption("薬局名をクリックすると、地図がその薬局へズームします。")
+            # 表示件数が多いと重いので、まず上限を設ける（必要なら増やせます）
+            max_buttons = 200
+            df_for_buttons = show_df.head(max_buttons)
+
+            for _, r in df_for_buttons.iterrows():
+                uid = str(r["UID"])
+                label = r["薬局名"]
+                # 選択中は見分けやすくする
+                if highlight_uid == uid:
+                    label = f"▶ {label}"
+                if st.button(label, key=f"ph_btn_{uid}"):
+                    st.session_state.selected_pin_uid = uid
+                    st.rerun()
+
+            if len(show_df) > max_buttons:
+                st.info(f"件数が多いため、薬局名ボタンは先頭 {max_buttons} 件のみ表示しています。")
+
+        st.markdown("---")
+        st.caption("☑で選択すると、下からExcelダウンロードできます。")
 
         view = add_link_columns(show_df).reset_index(drop=True)
 
@@ -977,7 +1151,7 @@ def main() -> None:
             edited = st.data_editor(
                 st.session_state.list_editor_df,
                 use_container_width=True,
-                height=720,
+                height=520,  # ★ボタン領域にスペースを取るため少し縮める
                 hide_index=True,
                 column_config={
                     "☑": st.column_config.CheckboxColumn("☑"),
@@ -999,6 +1173,9 @@ def main() -> None:
             selected |= checked_uids
             st.session_state.selected_uids = selected
 
+        # -----------------------------
+        # 選択結果のExcel出力
+        # -----------------------------
         st.markdown("---")
         c1, c2 = st.columns([1, 1])
         with c1:
