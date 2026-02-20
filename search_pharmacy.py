@@ -45,6 +45,30 @@ import folium
 from folium.plugins import MarkerCluster, FastMarkerCluster
 from streamlit_folium import st_folium
 from branca.element import MacroElement, Template
+class LeafletDefaultIconCDNFix(MacroElement):
+    """Fix Leaflet default marker icons when marker-icon.png cannot be resolved.
+
+    Streamlit/st_folium environments sometimes fail to serve Leaflet's bundled images.
+    This forces Leaflet's default icon URLs to a CDN so L.Icon.Default() works reliably.
+    """
+
+    def __init__(self, leaflet_version: str = "1.9.4"):
+        super().__init__()
+        cdn_base = f"https://unpkg.com/leaflet@{leaflet_version}/dist/images"
+        self._template = Template(
+            f"""
+            <script>
+            (function() {{
+              if (!window.L || !L.Icon || !L.Icon.Default) return;
+              L.Icon.Default.mergeOptions({{
+                iconRetinaUrl: '{cdn_base}/marker-icon-2x.png',
+                iconUrl: '{cdn_base}/marker-icon.png',
+                shadowUrl: '{cdn_base}/marker-shadow.png'
+              }});
+            }})();
+            </script>
+            """
+        )
 
 # 住所 -> 緯度経度（外部通信が必要）
 try:
@@ -563,6 +587,8 @@ def build_map(
     selected_circle_km: Optional[float],
 ) -> folium.Map:
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+    # Leafletのデフォルトマーカー画像をCDNに固定（FastMarkerClusterの L.Icon.Default() 崩れ対策）
+    LeafletDefaultIconCDNFix().add_to(m)
 
     if pending_point is not None:
         folium.Marker(
