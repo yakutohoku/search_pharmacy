@@ -1,6 +1,4 @@
-from pathlib import Path
-
-code = r'''"""
+"""
 薬局マップ（Streamlit + Folium）- デバッグ版
 
 【変更点】
@@ -760,11 +758,11 @@ def geocode_address(address: str, bias_df: Optional[pd.DataFrame] = None) -> Opt
     for q in _address_candidates(address):
         loc = nom_geocode(q, country_codes="jp")
         if loc is not None:
-            candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude))))
+            candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude)))
 
         loc2 = arc_geocode(q)
         if loc2 is not None:
-            candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude))))
+            candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude)))
 
     if not candidates:
         return None
@@ -1290,17 +1288,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-'''
-# fix syntax typo from accidental extra parenthesis
-code = code.replace(
-    'candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude))))',
-    'candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude)))'
-)
-code = code.replace(
-    'candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude))))',
-    'candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude)))'
-)
-
-path = Path('/mnt/data/debug_pharmacy_map.py')
-path.write_text(code, encoding='utf-8')
-print(f"Wrote {path}")
