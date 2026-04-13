@@ -1,32 +1,13 @@
-"""
-薬局マップ（Streamlit + Folium）
+from pathlib import Path
 
-【主な機能】
-1) Excel先頭シートの P列(緯度)・Q列(経度)を使って薬局を地図表示（青ピン）
-   - 緯度/経度が空の行は表示しない
-   - ピンをクリックすると
-     薬局名(C列)、法人名（E列全文ラベル変更）、住所(I列) を表示
-     Googleマップリンク・求人リンク（管理薬剤師K列, 常勤L列, パートM列, 派遣N列, 契約O列）
+code = r'''"""
+薬局マップ（Streamlit + Folium）- デバッグ版
 
-2) 検索
-   - 住所・駅名で検索（半径指定 / ネットワークが必要）
-   - 地図をクリックして指定（半径指定 / 確実）
-   - 薬局名で検索（部分一致 + 都道府県で絞り込み）
-   - 法人で検索（E列から法人名部分だけ抽出 + スペース無視で完全一致）
-   - 社長名で検索（E列から「氏名」部分だけ抽出 + スペース無視で完全一致）
-
-3) 薬局名で検索のときのみ
-   - 一覧の店舗名ボタンをクリックすると、その薬局のピンが目立つ（色・大きさ変更）
-   - 2km 圏内が見やすい倍率にズーム（2km円も表示）
-   - ※薬局名検索では data_editor の一覧は表示しない
-
-4) その他の検索モードでは
-   - 複数選択（☑）→Excel出力 の機能を残す
-
-【修正ポイント（今回）】
-- 都道府県は「H列（都道府県）」を優先して読み込み（無い場合のみ住所から推定）
-  → 都道府県絞り込みが正しく効くように修正
-
+【変更点】
+- load_pharmacy_data と build_all_points を分離して例外表示
+- build_all_points で失敗した行の詳細を表示
+- _make_popup_html / job_li で失敗した値と型を表示
+- 本修正として job_li では _normalize_id() を再度通して安全化
 """
 
 from __future__ import annotations
@@ -45,12 +26,10 @@ import folium
 from folium.plugins import MarkerCluster, FastMarkerCluster
 from streamlit_folium import st_folium
 from branca.element import MacroElement, Template
-class LeafletDefaultIconCDNFix(MacroElement):
-    """Fix Leaflet default marker icons when marker-icon.png cannot be resolved.
 
-    Streamlit/st_folium environments sometimes fail to serve Leaflet's bundled images.
-    This forces Leaflet's default icon URLs to a CDN so L.Icon.Default() works reliably.
-    """
+
+class LeafletDefaultIconCDNFix(MacroElement):
+    """Fix Leaflet default marker icons when marker-icon.png cannot be resolved."""
 
     def __init__(self, leaflet_version: str = "1.9.4"):
         super().__init__()
@@ -70,6 +49,7 @@ class LeafletDefaultIconCDNFix(MacroElement):
             """
         )
 
+
 # 住所 -> 緯度経度（外部通信が必要）
 try:
     from geopy.geocoders import Nominatim, ArcGIS
@@ -86,14 +66,12 @@ except Exception:
 JOB_BASE_URL = "https://yaku-job.com/preview/"
 GOOGLE_MAPS_QUERY_URL = "https://www.google.com/maps/search/?api=1&query={lat},{lon}"
 
-# 参照情報（未読み込み時にメイン画面へ表示する）
 REFERENCE_FOLDER = r"\\file-tky\Section\薬剤師共有\★【支店・課】_東北\東北\薬局検索"
 REFERENCE_FILE_LIST = [
     "東北 薬局リスト.xlsm",
     "北海道 薬局リスト.xlsm",
 ]
 
-# 都道府県（絞り込み対象）
 PREFECTURE_SELECT = ["すべて", "北海道", "青森", "秋田", "岩手", "宮城", "山形", "福島"]
 PREF_LABEL_TO_CANONICAL = {
     "北海道": "北海道",
@@ -110,7 +88,7 @@ PREF_LABEL_TO_CANONICAL = {
 COL = {
     "pharmacy_name": 2,    # C: 薬局名
     "opener_name": 4,      # E: 厚生局開設者氏名（法人名+代表取締役+氏名）
-    "pref": 7,             # H: 都道府県（←今回ここを使う）
+    "pref": 7,             # H: 都道府県
     "address": 8,          # I: 住所
     "id_manager": 10,      # K: 管理薬剤師ID
     "id_fulltime": 11,     # L: 常勤ID
@@ -178,7 +156,6 @@ def _escape_html(text: str) -> str:
 # 検索用ユーティリティ
 # =============================================================================
 def normalize_space_ignored(text: str) -> str:
-    """スペース（半角/全角）を無視して比較するための正規化（完全一致用）。"""
     t = unicodedata.normalize("NFKC", text or "")
     t = t.replace("　", " ")
     t = re.sub(r"\s+", "", t)
@@ -186,7 +163,6 @@ def normalize_space_ignored(text: str) -> str:
 
 
 def normalize_contains_key(text: str) -> str:
-    """部分一致（contains）用の正規化キー（空白を除去）。"""
     t = unicodedata.normalize("NFKC", text or "")
     t = t.replace("　", " ")
     t = re.sub(r"\s+", "", t)
@@ -194,10 +170,6 @@ def normalize_contains_key(text: str) -> str:
 
 
 def extract_corporation_part_from_opener(opener_raw: str) -> str:
-    """
-    E列（厚生局開設者氏名）から「法人名部分だけ」を切り出す。
-    - 「代表取締役」等の手前までを法人名として採用
-    """
     t = unicodedata.normalize("NFKC", opener_raw or "").replace("　", " ").strip()
     m = re.search(r"(代表取締役社長|代表取締役|代表社員|理事長|院長|代表者)", t)
     if m:
@@ -206,13 +178,11 @@ def extract_corporation_part_from_opener(opener_raw: str) -> str:
 
 
 def corporation_search_key_from_opener(opener_raw: str) -> str:
-    """法人検索用キー（スペース無視で完全一致）。"""
     corp_part = extract_corporation_part_from_opener(opener_raw)
     return normalize_space_ignored(corp_part)
 
 
 def extract_ceo_name_from_opener(opener_raw: str) -> str:
-    """E列（厚生局開設者氏名）から「氏名部分」を切り出す。"""
     t = unicodedata.normalize("NFKC", opener_raw or "").replace("　", " ").strip()
     m = re.search(r"(代表取締役社長|代表取締役|代表社員|理事長|院長|代表者)\s*(.*)$", t)
     if not m:
@@ -226,19 +196,13 @@ def extract_ceo_name_from_opener(opener_raw: str) -> str:
 
 
 def ceo_search_key_from_opener(opener_raw: str) -> str:
-    """社長名検索キー（苗字・名前の間の空白も無視、完全一致）。"""
     name_part = extract_ceo_name_from_opener(opener_raw)
     return normalize_space_ignored(name_part)
 
 
 def extract_prefecture_from_address(address: str) -> str:
-    """
-    住所から都道府県を推定（北海道・東北のみ）。
-    ※今回は H列（都道府県）があるため、あくまでフォールバック
-    """
     t = unicodedata.normalize("NFKC", address or "")
     t = t.replace("　", " ").strip()
-    # 先頭の郵便番号を除去
     t = re.sub(r"^\s*〒?\s*\d{3}\s*-\s*\d{4}\s*", "", t)
     t = re.sub(r"^\s*〒?\s*\d{7}\s*", "", t).strip()
 
@@ -249,7 +213,14 @@ def extract_prefecture_from_address(address: str) -> str:
     if "北海道" in t:
         return "北海道"
 
-    for short, canonical in [("青森", "青森県"), ("秋田", "秋田県"), ("岩手", "岩手県"), ("宮城", "宮城県"), ("山形", "山形県"), ("福島", "福島県")]:
+    for short, canonical in [
+        ("青森", "青森県"),
+        ("秋田", "秋田県"),
+        ("岩手", "岩手県"),
+        ("宮城", "宮城県"),
+        ("山形", "山形県"),
+        ("福島", "福島県"),
+    ]:
         if short in t:
             return canonical
 
@@ -257,39 +228,42 @@ def extract_prefecture_from_address(address: str) -> str:
 
 
 def normalize_prefecture_value(pref_raw: Any, address_fallback: str) -> str:
-    """
-    H列（都道府県）を正規化して保存する
-    - "青森" → "青森県" など
-    - 空の場合のみ住所から推定
-    """
     t = unicodedata.normalize("NFKC", str(pref_raw or "")).replace("　", " ").strip()
     if t and t.lower() not in {"nan", "none"}:
-        # 既に正式表記っぽい場合
         if t == "北海道":
             return "北海道"
         if t.endswith("県") and len(t) <= 4:
             return t
-        # "青森県八戸市..." のような混在でも拾う
         for canonical in ["青森県", "秋田県", "岩手県", "宮城県", "山形県", "福島県"]:
             if canonical in t:
                 return canonical
         if "北海道" in t:
             return "北海道"
-        # 県名省略
-        for short, canonical in [("青森", "青森県"), ("秋田", "秋田県"), ("岩手", "岩手県"), ("宮城", "宮城県"), ("山形", "山形県"), ("福島", "福島県")]:
+        for short, canonical in [
+            ("青森", "青森県"),
+            ("秋田", "秋田県"),
+            ("岩手", "岩手県"),
+            ("宮城", "宮城県"),
+            ("山形", "山形県"),
+            ("福島", "福島県"),
+        ]:
             if t == short or t.startswith(short):
                 return canonical
-        # ここまでで決められない場合も、含まれていれば採用
-        for short, canonical in [("青森", "青森県"), ("秋田", "秋田県"), ("岩手", "岩手県"), ("宮城", "宮城県"), ("山形", "山形県"), ("福島", "福島県")]:
+        for short, canonical in [
+            ("青森", "青森県"),
+            ("秋田", "秋田県"),
+            ("岩手", "岩手県"),
+            ("宮城", "宮城県"),
+            ("山形", "山形県"),
+            ("福島", "福島県"),
+        ]:
             if short in t:
                 return canonical
 
-    # フォールバック
     return extract_prefecture_from_address(address_fallback)
 
 
 def prefecture_display(pref: str) -> str:
-    """表示用（県を省略、北海道はそのまま）。"""
     p = (pref or "").strip()
     if not p:
         return "不明"
@@ -319,7 +293,6 @@ def _apply_ui_css() -> None:
             white-space: normal !important;
         }
 
-        /* uploader: 英文を消して日本語表示へ（DOM変更に備えて広めに当てる） */
         div[data-testid="stFileUploaderDropzone"] [data-testid="stFileUploaderDropzoneInstructions"] { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] > div:nth-child(1) { display:none !important; }
         div[data-testid="stFileUploaderDropzone"] p { display:none !important; }
@@ -368,57 +341,79 @@ def load_pharmacy_data(file_bytes: bytes) -> pd.DataFrame:
         raise ValueError("Excelにシートが存在しません。")
 
     sheet = wb[wb.sheetnames[0]]
-
     records: List[Dict[str, Any]] = []
 
     for excel_row_no, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
-        lat = _safe_float(row[COL["lat"]] if len(row) > COL["lat"] else None)
-        lon = _safe_float(row[COL["lon"]] if len(row) > COL["lon"] else None)
-        if lat is None or lon is None:
-            continue
+        try:
+            lat = _safe_float(row[COL["lat"]] if len(row) > COL["lat"] else None)
+            lon = _safe_float(row[COL["lon"]] if len(row) > COL["lon"] else None)
+            if lat is None or lon is None:
+                continue
 
-        pharmacy_name = row[COL["pharmacy_name"]] if len(row) > COL["pharmacy_name"] else None
-        opener_name = row[COL["opener_name"]] if len(row) > COL["opener_name"] else None
-        pref_raw = row[COL["pref"]] if len(row) > COL["pref"] else None
-        address = row[COL["address"]] if len(row) > COL["address"] else None
+            pharmacy_name = row[COL["pharmacy_name"]] if len(row) > COL["pharmacy_name"] else None
+            opener_name = row[COL["opener_name"]] if len(row) > COL["opener_name"] else None
+            pref_raw = row[COL["pref"]] if len(row) > COL["pref"] else None
+            address = row[COL["address"]] if len(row) > COL["address"] else None
 
-        opener_str = str(opener_name).strip() if opener_name is not None else ""
-        pharmacy_str = str(pharmacy_name).strip() if pharmacy_name is not None else ""
-        address_str = str(address).strip() if address is not None else ""
+            opener_str = str(opener_name).strip() if opener_name is not None else ""
+            pharmacy_str = str(pharmacy_name).strip() if pharmacy_name is not None else ""
+            address_str = str(address).strip() if address is not None else ""
 
-        corp_name = extract_corporation_part_from_opener(opener_str)
-        ceo_name = extract_ceo_name_from_opener(opener_str)
+            corp_name = extract_corporation_part_from_opener(opener_str)
+            ceo_name = extract_ceo_name_from_opener(opener_str)
+            pref = normalize_prefecture_value(pref_raw, address_str)
 
-        pref = normalize_prefecture_value(pref_raw, address_str)
+            records.append(
+                {
+                    "UID": str(excel_row_no),
+                    "Excel行番号": int(excel_row_no),
 
-        records.append(
-            {
-                "UID": str(excel_row_no),
-                "Excel行番号": int(excel_row_no),
+                    "薬局名": pharmacy_str,
+                    "薬局名検索キー": normalize_contains_key(pharmacy_str),
 
-                "薬局名": pharmacy_str,
-                "薬局名検索キー": normalize_contains_key(pharmacy_str),
+                    "開設者氏名": opener_str,
+                    "法人名": corp_name,
+                    "社長名": ceo_name,
 
-                "開設者氏名": opener_str,
-                "法人名": corp_name,
-                "社長名": ceo_name,
+                    "法人検索キー": corporation_search_key_from_opener(opener_str),
+                    "社長検索キー": ceo_search_key_from_opener(opener_str),
 
-                "法人検索キー": corporation_search_key_from_opener(opener_str),
-                "社長検索キー": ceo_search_key_from_opener(opener_str),
+                    "住所": address_str,
+                    "都道府県": pref,
 
-                "住所": address_str,
-                "都道府県": pref,
+                    "緯度": float(lat),
+                    "経度": float(lon),
 
-                "緯度": float(lat),
-                "経度": float(lon),
+                    "管理薬剤師ID": _normalize_id(row[COL["id_manager"]] if len(row) > COL["id_manager"] else None),
+                    "常勤ID": _normalize_id(row[COL["id_fulltime"]] if len(row) > COL["id_fulltime"] else None),
+                    "パートID": _normalize_id(row[COL["id_part"]] if len(row) > COL["id_part"] else None),
+                    "派遣ID": _normalize_id(row[COL["id_temp"]] if len(row) > COL["id_temp"] else None),
+                    "契約社員ID": _normalize_id(row[COL["id_contract"]] if len(row) > COL["id_contract"] else None),
+                }
+            )
 
-                "管理薬剤師ID": _normalize_id(row[COL["id_manager"]] if len(row) > COL["id_manager"] else None),
-                "常勤ID": _normalize_id(row[COL["id_fulltime"]] if len(row) > COL["id_fulltime"] else None),
-                "パートID": _normalize_id(row[COL["id_part"]] if len(row) > COL["id_part"] else None),
-                "派遣ID": _normalize_id(row[COL["id_temp"]] if len(row) > COL["id_temp"] else None),
-                "契約社員ID": _normalize_id(row[COL["id_contract"]] if len(row) > COL["id_contract"] else None),
-            }
-        )
+        except Exception as e:
+            raise RuntimeError(
+                "load_pharmacy_data失敗: "
+                f"Excel行番号={excel_row_no}, "
+                f"C列={row[COL['pharmacy_name']] if len(row) > COL['pharmacy_name'] else None}, "
+                f"E列={row[COL['opener_name']] if len(row) > COL['opener_name'] else None}, "
+                f"H列={row[COL['pref']] if len(row) > COL['pref'] else None}, "
+                f"I列={row[COL['address']] if len(row) > COL['address'] else None}, "
+                f"K列={row[COL['id_manager']] if len(row) > COL['id_manager'] else None} "
+                f"({type(row[COL['id_manager']]).__name__ if len(row) > COL['id_manager'] and row[COL['id_manager']] is not None else 'NoneType'}), "
+                f"L列={row[COL['id_fulltime']] if len(row) > COL['id_fulltime'] else None} "
+                f"({type(row[COL['id_fulltime']]).__name__ if len(row) > COL['id_fulltime'] and row[COL['id_fulltime']] is not None else 'NoneType'}), "
+                f"M列={row[COL['id_part']] if len(row) > COL['id_part'] else None} "
+                f"({type(row[COL['id_part']]).__name__ if len(row) > COL['id_part'] and row[COL['id_part']] is not None else 'NoneType'}), "
+                f"N列={row[COL['id_temp']] if len(row) > COL['id_temp'] else None} "
+                f"({type(row[COL['id_temp']]).__name__ if len(row) > COL['id_temp'] and row[COL['id_temp']] is not None else 'NoneType'}), "
+                f"O列={row[COL['id_contract']] if len(row) > COL['id_contract'] else None} "
+                f"({type(row[COL['id_contract']]).__name__ if len(row) > COL['id_contract'] and row[COL['id_contract']] is not None else 'NoneType'}), "
+                f"P列={row[COL['lat']] if len(row) > COL['lat'] else None}, "
+                f"Q列={row[COL['lon']] if len(row) > COL['lon'] else None}, "
+                f"元エラー={type(e).__name__}: {e}"
+            )
 
     df = pd.DataFrame.from_records(records)
     if df.empty:
@@ -498,62 +493,104 @@ def add_map_loading_overlay(m: folium.Map, message: str = "検索中・・・地
 # 地図：ピンのポップアップ
 # =============================================================================
 def _make_popup_html(r: pd.Series) -> str:
-    name = _escape_html(str(r.get("薬局名", "")))
-    opener_full = _escape_html(str(r.get("開設者氏名", "")))
-    addr = _escape_html(str(r.get("住所", "")))
+    try:
+        name = _escape_html(str(r.get("薬局名", "")))
+        opener_full = _escape_html(str(r.get("開設者氏名", "")))
+        addr = _escape_html(str(r.get("住所", "")))
 
-    lat = float(r["緯度"])
-    lon = float(r["経度"])
-    gmap = GOOGLE_MAPS_QUERY_URL.format(lat=lat, lon=lon)
+        lat = float(r["緯度"])
+        lon = float(r["経度"])
+        gmap = GOOGLE_MAPS_QUERY_URL.format(lat=lat, lon=lon)
 
-    def job_li(label: str, job_id: Optional[str]) -> str:
-        if job_id:
-            return f'<li><a href="{JOB_BASE_URL + job_id}" target="_blank" rel="noopener noreferrer">{label}</a></li>'
-        return f"<li>{label}: IDなし</li>"
+        def job_li(label: str, job_id: Optional[str]) -> str:
+            try:
+                jid = _normalize_id(job_id)
+                if jid:
+                    return f'<li><a href="{JOB_BASE_URL + jid}" target="_blank" rel="noopener noreferrer">{label}</a></li>'
+                return f"<li>{label}: IDなし</li>"
+            except Exception as e:
+                raise RuntimeError(
+                    f"job_li失敗: label={label}, job_id={job_id}, "
+                    f"type={type(job_id).__name__}, 元エラー={type(e).__name__}: {e}"
+                )
 
-    jobs = (
-        "<div style='margin-top:6px;'><div><b>求人リンク</b></div>"
-        "<ul style='margin:4px 0 0 18px;padding:0;'>"
-        f"{job_li('管理薬剤師求人', r.get('管理薬剤師ID'))}"
-        f"{job_li('常勤求人', r.get('常勤ID'))}"
-        f"{job_li('パート求人', r.get('パートID'))}"
-        f"{job_li('派遣求人', r.get('派遣ID'))}"
-        f"{job_li('契約社員', r.get('契約社員ID'))}"
-        "</ul></div>"
-    )
+        jobs = (
+            "<div style='margin-top:6px;'><div><b>求人リンク</b></div>"
+            "<ul style='margin:4px 0 0 18px;padding:0;'>"
+            f"{job_li('管理薬剤師求人', r.get('管理薬剤師ID'))}"
+            f"{job_li('常勤求人', r.get('常勤ID'))}"
+            f"{job_li('パート求人', r.get('パートID'))}"
+            f"{job_li('派遣求人', r.get('派遣ID'))}"
+            f"{job_li('契約社員', r.get('契約社員ID'))}"
+            "</ul></div>"
+        )
 
-    return f"""
-    <div style="font-size:13px;line-height:1.4;max-width:420px;">
-      <div style="font-size:14px;"><b>{name}</b></div>
-      <div>法人名: {opener_full}</div>
-      <div>住所: {addr}</div>
-      <div style="margin-top:6px;">
-        <a href="{gmap}" target="_blank" rel="noopener noreferrer">Googleマップを開く</a>
-      </div>
-      {jobs}
-    </div>
-    """
+        return f"""
+        <div style="font-size:13px;line-height:1.4;max-width:420px;">
+          <div style="font-size:14px;"><b>{name}</b></div>
+          <div>法人名: {opener_full}</div>
+          <div>住所: {addr}</div>
+          <div style="margin-top:6px;">
+            <a href="{gmap}" target="_blank" rel="noopener noreferrer">Googleマップを開く</a>
+          </div>
+          {jobs}
+        </div>
+        """
+
+    except Exception as e:
+        raise RuntimeError(
+            "_make_popup_html失敗: "
+            f"UID={r.get('UID')}, "
+            f"Excel行番号={r.get('Excel行番号')}, "
+            f"薬局名={r.get('薬局名')}, "
+            f"管理薬剤師ID={r.get('管理薬剤師ID')} ({type(r.get('管理薬剤師ID')).__name__}), "
+            f"常勤ID={r.get('常勤ID')} ({type(r.get('常勤ID')).__name__}), "
+            f"パートID={r.get('パートID')} ({type(r.get('パートID')).__name__}), "
+            f"派遣ID={r.get('派遣ID')} ({type(r.get('派遣ID')).__name__}), "
+            f"契約社員ID={r.get('契約社員ID')} ({type(r.get('契約社員ID')).__name__}), "
+            f"元エラー={type(e).__name__}: {e}"
+        )
 
 
 @st.cache_data(show_spinner=False)
 def build_all_points(df: pd.DataFrame) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     """
     全件の地図表示用ポイントを1回だけ作り、UID->index を持って高速に部分抽出できるようにする。
-    （検索条件が変わっても、ポップアップHTML生成を繰り返さないため体感速度が上がります）
     """
     pts: List[Dict[str, Any]] = []
     uid_to_idx: Dict[str, int] = {}
+
     for i, (_, r) in enumerate(df.iterrows()):
-        uid = str(r.get("UID", ""))
-        p = {
-            "uid": uid,
-            "lat": float(r["緯度"]),
-            "lon": float(r["経度"]),
-            "tooltip": str(r.get("薬局名", "")),
-            "popup_html": _make_popup_html(r),
-        }
-        uid_to_idx[uid] = i
-        pts.append(p)
+        try:
+            uid = str(r.get("UID", ""))
+            p = {
+                "uid": uid,
+                "lat": float(r["緯度"]),
+                "lon": float(r["経度"]),
+                "tooltip": str(r.get("薬局名", "")),
+                "popup_html": _make_popup_html(r),
+            }
+            uid_to_idx[uid] = i
+            pts.append(p)
+
+        except Exception as e:
+            raise RuntimeError(
+                "build_all_points失敗: "
+                f"UID={r.get('UID')}, "
+                f"Excel行番号={r.get('Excel行番号')}, "
+                f"薬局名={r.get('薬局名')}, "
+                f"開設者氏名={r.get('開設者氏名')}, "
+                f"住所={r.get('住所')}, "
+                f"緯度={r.get('緯度')} ({type(r.get('緯度')).__name__}), "
+                f"経度={r.get('経度')} ({type(r.get('経度')).__name__}), "
+                f"管理薬剤師ID={r.get('管理薬剤師ID')} ({type(r.get('管理薬剤師ID')).__name__}), "
+                f"常勤ID={r.get('常勤ID')} ({type(r.get('常勤ID')).__name__}), "
+                f"パートID={r.get('パートID')} ({type(r.get('パートID')).__name__}), "
+                f"派遣ID={r.get('派遣ID')} ({type(r.get('派遣ID')).__name__}), "
+                f"契約社員ID={r.get('契約社員ID')} ({type(r.get('契約社員ID')).__name__}), "
+                f"元エラー={type(e).__name__}: {e}"
+            )
+
     return pts, uid_to_idx
 
 
@@ -568,12 +605,7 @@ def pick_points_from_uids(points_all: List[Dict[str, Any]], uid_to_idx: Dict[str
 
 @st.cache_data(show_spinner=False)
 def json_rows_for_fast_cluster(points: List[Dict[str, Any]]) -> List[List[Any]]:
-    """
-    FastMarkerCluster 用のデータ（JSへ渡す配列）
-    row = [lat, lon, popup_html, tooltip]
-    """
     return [[p["lat"], p["lon"], p["popup_html"], p.get("tooltip", "")] for p in points]
-
 
 
 def build_map(
@@ -587,7 +619,6 @@ def build_map(
     selected_circle_km: Optional[float],
 ) -> folium.Map:
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
-    # Leafletのデフォルトマーカー画像をCDNに固定（FastMarkerClusterの L.Icon.Default() 崩れ対策）
     LeafletDefaultIconCDNFix().add_to(m)
 
     if pending_point is not None:
@@ -635,11 +666,8 @@ def build_map(
                 ).add_to(m)
                 break
 
-    # --- 薬局ピン ---
-    # 大量ピンは FastMarkerCluster を使うと、Python側の生成コストが大きく減って軽くなります。
     fast_threshold = 1200
 
-    # 選択中（薬局名検索）の赤ピンは「別で1本」表示し、通常ピン（青）と重複しないように除外する
     selected_point: Optional[Dict[str, Any]] = None
     if selected_uid:
         for p in points:
@@ -652,7 +680,6 @@ def build_map(
         blue_points = [p for p in points if p.get("uid") != selected_uid]
 
     if len(blue_points) > fast_threshold:
-        # FastMarkerCluster（青ピン）
         rows = json_rows_for_fast_cluster(blue_points)
         callback = """
         function (row) {
@@ -673,7 +700,6 @@ def build_map(
                 icon=folium.Icon(color="blue", icon="info-sign"),
             ).add_to(cluster)
 
-    # 選択中の赤ピン（薬局名検索）
     if selected_point is not None:
         folium.Marker(
             location=(selected_point["lat"], selected_point["lon"]),
@@ -734,11 +760,11 @@ def geocode_address(address: str, bias_df: Optional[pd.DataFrame] = None) -> Opt
     for q in _address_candidates(address):
         loc = nom_geocode(q, country_codes="jp")
         if loc is not None:
-            candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude)))
+            candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude))))
 
         loc2 = arc_geocode(q)
         if loc2 is not None:
-            candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude)))
+            candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude))))
 
     if not candidates:
         return None
@@ -889,7 +915,6 @@ def main() -> None:
     st.title("薬局検索マップ")
     st.caption("手順：1) Excelを読み込む → 2) 検索方法を選ぶ → 3) 地図と一覧で確認 → 4) ☑で選択しExcel出力")
 
-    # session defaults
     st.session_state.setdefault("clicked_point", None)
     st.session_state.setdefault("pending_point", None)
     st.session_state.setdefault("corp_query_raw", "")
@@ -905,9 +930,6 @@ def main() -> None:
     st.session_state.setdefault("radius_km", float(DEFAULT_RADIUS_KM))
     st.session_state.setdefault("max_map_markers", int(DEFAULT_MAX_MAP_MARKERS))
 
-    # -------------------------------------------------------------------------
-    # 1. データ読み込み（サイドバー）
-    # -------------------------------------------------------------------------
     st.sidebar.header("1. データを読み込む")
     st.sidebar.write("Excelファイルを選択してください。")
 
@@ -918,7 +940,6 @@ def main() -> None:
     )
     file_bytes: Optional[bytes] = uploaded.getvalue() if uploaded is not None else None
 
-    # 未読み込み時：参照情報をメイン画面に表示
     if file_bytes is None:
         st.info("左の「1. データを読み込む」からExcelを読み込んでください。")
 
@@ -932,19 +953,18 @@ def main() -> None:
 
         st.stop()
 
-    # -------------------------------------------------------------------------
-    # Excel読み込み
-    # -------------------------------------------------------------------------
     try:
         df = load_pharmacy_data(file_bytes)
-        points_all, uid_to_idx = build_all_points(df)
     except Exception as e:
-        st.error(f"読み込みに失敗しました: {e}")
+        st.error(f"load_pharmacy_dataで失敗: {type(e).__name__}: {e}")
         st.stop()
 
-    # -------------------------------------------------------------------------
-    # 2. 検索（サイドバー）
-    # -------------------------------------------------------------------------
+    try:
+        points_all, uid_to_idx = build_all_points(df)
+    except Exception as e:
+        st.error(f"build_all_pointsで失敗: {type(e).__name__}: {e}")
+        st.stop()
+
     st.sidebar.header("2. 検索")
 
     search_mode = st.sidebar.radio(
@@ -959,7 +979,6 @@ def main() -> None:
         index=0,
     )
 
-    # よく変えない設定は各ボタンの下へ
     if search_mode == "住所・駅名で検索（半径指定）":
         st.sidebar.caption("例：宮城県仙台市青葉区中央1-1-1 / 仙台駅")
         address = st.sidebar.text_input("住所・駅名", value="", placeholder="例：仙台駅")
@@ -1065,9 +1084,6 @@ def main() -> None:
             st.sidebar.number_input("地図ピンの最大表示数", 500, 20000, int(st.session_state.max_map_markers), 500)
         )
 
-    # -------------------------------------------------------------------------
-    # 絞り込み
-    # -------------------------------------------------------------------------
     corp_query_raw = st.session_state.corp_query_raw.strip()
     ceo_query_raw = st.session_state.ceo_query_raw.strip()
     pharmacy_query_raw = st.session_state.pharmacy_query_raw.strip()
@@ -1093,9 +1109,6 @@ def main() -> None:
         if search_point is not None:
             show_df = filter_within_radius(df, search_point, float(st.session_state.radius_km))
 
-    # -------------------------------------------------------------------------
-    # ステータス帯
-    # -------------------------------------------------------------------------
     st.markdown(
         _status_bar_html(
             total=len(df),
@@ -1113,7 +1126,6 @@ def main() -> None:
 
     col_map, col_list = st.columns([5, 2], gap="large")
 
-    # 地図中心・ズーム
     selected_circle_km: Optional[float] = None
     if mode_label == "薬局名で検索" and selected_uid:
         sel = show_df[show_df["UID"].astype(str) == str(selected_uid)]
@@ -1130,12 +1142,9 @@ def main() -> None:
         center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
         zoom = 11 if (mode_label in {"法人で検索", "社長名で検索"} or (mode_label == "半径検索" and search_point is not None) or mode_label == "薬局名で検索") else 8
 
-    # 地図
     with col_map:
         st.subheader("地図")
         pending_point: Optional[SearchPoint] = st.session_state.pending_point
-
-        # 薬局名で検索のときは「検索結果だけ」ではなく、読み込んだ薬局データをすべて地図に表示する
         map_df = df if mode_label == "薬局名で検索" else show_df
 
         if len(map_df) > int(st.session_state.max_map_markers):
@@ -1146,7 +1155,7 @@ def main() -> None:
             map_df = map_df.head(int(st.session_state.max_map_markers))
 
         with st.spinner("検索中・・・地図を表示しています"):
-            uids = map_df['UID'].astype(str).tolist()
+            uids = map_df["UID"].astype(str).tolist()
             points = pick_points_from_uids(points_all, uid_to_idx, uids)
             fmap = build_map(
                 center=center,
@@ -1179,7 +1188,6 @@ def main() -> None:
         if mode_label == "薬局名で検索" and pharmacy_query_raw and show_df.empty:
             st.warning("一致する薬局名が見つかりませんでした。")
 
-    # 一覧
     with col_list:
         st.subheader("一覧")
 
@@ -1202,7 +1210,6 @@ def main() -> None:
 
                 for _, r in tmp.iterrows():
                     uid = str(r["UID"])
-                    pref_disp = prefecture_display(r["都道府県"])
                     label = f"{r['薬局名']}"
                     is_selected = (st.session_state.selected_map_uid == uid)
                     btn_label = ("✅ " if is_selected else "") + label
@@ -1214,10 +1221,8 @@ def main() -> None:
                     if st.button("選択を解除", key="clear_pick"):
                         st.session_state.selected_map_uid = None
 
-            # 薬局名検索では data_editor を出さない
             return
 
-        # ここから従来どおり（薬局名検索以外）
         view = add_link_columns(show_df).reset_index(drop=True)
         cols = ["☑", "薬局名", "法人名", "住所", "Googleマップ", "管理薬剤師求人", "常勤求人", "パート求人", "派遣求人", "契約社員"]
 
@@ -1285,3 +1290,17 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+'''
+# fix syntax typo from accidental extra parenthesis
+code = code.replace(
+    'candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude))))',
+    'candidates.append(SearchPoint(lat=float(loc.latitude), lon=float(loc.longitude)))'
+)
+code = code.replace(
+    'candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude))))',
+    'candidates.append(SearchPoint(lat=float(loc2.latitude), lon=float(loc2.longitude)))'
+)
+
+path = Path('/mnt/data/debug_pharmacy_map.py')
+path.write_text(code, encoding='utf-8')
+print(f"Wrote {path}")
