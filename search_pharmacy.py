@@ -606,6 +606,7 @@ def json_rows_for_fast_cluster(points: List[Dict[str, Any]]) -> List[List[Any]]:
     return [[p["lat"], p["lon"], p["popup_html"], p.get("tooltip", "")] for p in points]
 
 
+
 def build_map(
     center: Tuple[float, float],
     zoom: int,
@@ -617,13 +618,18 @@ def build_map(
     selected_circle_km: Optional[float],
 ) -> folium.Map:
     m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
-    LeafletDefaultIconCDNFix().add_to(m)
 
+    # 画像アイコン依存を避けるため、CircleMarker ベースで統一
     if pending_point is not None:
-        folium.Marker(
+        folium.CircleMarker(
             location=(pending_point.lat, pending_point.lon),
+            radius=8,
             tooltip="選択中（未確定）",
-            icon=folium.Icon(color="orange", icon="map-marker"),
+            weight=2,
+            color="#d97706",
+            fill=True,
+            fill_color="#f59e0b",
+            fill_opacity=0.95,
         ).add_to(m)
 
     if search_point is not None:
@@ -638,11 +644,16 @@ def build_map(
           </div>
         </div>
         """
-        folium.Marker(
+        folium.CircleMarker(
             location=(search_point.lat, search_point.lon),
+            radius=9,
             tooltip="検索地点（赤ピン）",
             popup=folium.Popup(sp_html, max_width=360),
-            icon=folium.Icon(color="red", icon="map-marker"),
+            weight=2,
+            color="#b91c1c",
+            fill=True,
+            fill_color="#ef4444",
+            fill_opacity=0.95,
         ).add_to(m)
 
         if radius_km and radius_km > 0:
@@ -664,8 +675,6 @@ def build_map(
                 ).add_to(m)
                 break
 
-    fast_threshold = 1200
-
     selected_point: Optional[Dict[str, Any]] = None
     if selected_uid:
         for p in points:
@@ -677,33 +686,32 @@ def build_map(
     if selected_point is not None:
         blue_points = [p for p in points if p.get("uid") != selected_uid]
 
-    if len(blue_points) > fast_threshold:
-        rows = json_rows_for_fast_cluster(blue_points)
-        callback = """
-        function (row) {
-            var marker = L.marker(new L.LatLng(row[0], row[1]), {icon: new L.Icon.Default()});
-            if (row[3]) { marker.bindTooltip(row[3]); }
-            if (row[2]) { marker.bindPopup(row[2], {maxWidth: 480}); }
-            return marker;
-        }
-        """
-        FastMarkerCluster(rows, callback=callback, name="薬局").add_to(m)
-    else:
-        cluster = MarkerCluster(name="薬局").add_to(m)
-        for p in blue_points:
-            folium.Marker(
-                location=(p["lat"], p["lon"]),
-                tooltip=p.get("tooltip", ""),
-                popup=folium.Popup(p["popup_html"], max_width=480),
-                icon=folium.Icon(color="blue", icon="info-sign"),
-            ).add_to(cluster)
+    # FastMarkerCluster は画像アイコン読み込み崩れの原因になりやすいため使わない
+    cluster = MarkerCluster(name="薬局").add_to(m)
+    for p in blue_points:
+        folium.CircleMarker(
+            location=(p["lat"], p["lon"]),
+            radius=6,
+            tooltip=p.get("tooltip", ""),
+            popup=folium.Popup(p["popup_html"], max_width=480),
+            weight=1,
+            color="#1d4ed8",
+            fill=True,
+            fill_color="#3b82f6",
+            fill_opacity=0.9,
+        ).add_to(cluster)
 
     if selected_point is not None:
-        folium.Marker(
+        folium.CircleMarker(
             location=(selected_point["lat"], selected_point["lon"]),
+            radius=10,
             tooltip=selected_point.get("tooltip", ""),
             popup=folium.Popup(selected_point["popup_html"], max_width=520),
-            icon=folium.Icon(color="red", icon="map-marker", prefix="fa"),
+            weight=3,
+            color="#b91c1c",
+            fill=True,
+            fill_color="#ef4444",
+            fill_opacity=1.0,
         ).add_to(m)
 
     folium.LayerControl().add_to(m)
