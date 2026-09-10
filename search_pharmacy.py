@@ -5,7 +5,9 @@
 - load_pharmacy_data と build_all_points を分離して例外表示
 - build_all_points で失敗した行の詳細を表示
 - _make_popup_html / job_li で失敗した値と型を表示
-- 本修正として job_li では _normalize_id() を再度通して安全化
+- job_li では _normalize_id() を再度通して安全化
+- 地図の移動・ズームに連動して「一覧」を現在の表示範囲へ更新
+- 検索条件変更時は地図の中心・ズームを検索結果側へ戻す
 """
 
 from __future__ import annotations
@@ -793,6 +795,36 @@ def filter_within_radius(df: pd.DataFrame, center: SearchPoint, radius_km: float
     return out
 
 
+def filter_by_map_bounds(df: pd.DataFrame, bounds: Optional[Dict[str, Any]]) -> pd.DataFrame:
+    """Leaflet の現在表示範囲に入っている行だけを返す。bounds が不正なら元データを返す。"""
+    if df.empty or not bounds:
+        return df.copy()
+
+    try:
+        sw = bounds.get("_southWest") or bounds.get("southWest") or bounds.get("southwest")
+        ne = bounds.get("_northEast") or bounds.get("northEast") or bounds.get("northeast")
+        if not sw or not ne:
+            return df.copy()
+
+        south = float(sw["lat"])
+        west = float(sw["lng"])
+        north = float(ne["lat"])
+        east = float(ne["lng"])
+    except (KeyError, TypeError, ValueError):
+        return df.copy()
+
+    south, north = min(south, north), max(south, north)
+    lat_mask = df["緯度"].between(south, north, inclusive="both")
+
+    # 通常は west <= east。日付変更線をまたぐ場合も壊れないようにしておく。
+    if west <= east:
+        lon_mask = df["経度"].between(west, east, inclusive="both")
+    else:
+        lon_mask = (df["経度"] >= west) | (df["経度"] <= east)
+
+    return df[lat_mask & lon_mask].copy()
+
+
 def filter_by_corporation(df: pd.DataFrame, corp_query_raw: str) -> pd.DataFrame:
     q = normalize_space_ignored(corp_query_raw)
     if not q:
@@ -898,7 +930,7 @@ def _status_bar_html(
       <div><b>読み込み完了</b>：{total:,}件（緯度・経度あり）</div>
       <div><b>検索モード</b>：{mode_label}</div>
       <div>{detail}</div>
-      <div><b>表示件数</b>：{shown:,}件</div>
+      <div><b>検索対象件数</b>：{shown:,}件</div>
     </div>
     """
 
@@ -927,6 +959,13 @@ def main() -> None:
 
     st.session_state.setdefault("radius_km", float(DEFAULT_RADIUS_KM))
     st.session_state.setdefault("max_map_markers", int(DEFAULT_MAX_MAP_MARKERS))
+
+    # 地図操作と一覧を同期するための状態
+    st.session_state.setdefault("map_center", None)
+    st.session_state.setdefault("map_zoom", None)
+    st.session_state.setdefault("map_bounds", None)
+    st.session_state.setdefault("map_search_signature", None)
+    st.session_state.setdefault("last_map_click_key", None)
 
     st.sidebar.header("1. データを読み込む")
     st.sidebar.write("Excelファイルを選択してください。")
@@ -992,6 +1031,7 @@ def main() -> None:
                 st.session_state.ceo_query_raw = ""
                 st.session_state.pharmacy_query_raw = ""
                 st.session_state.selected_map_uid = None
+            st.session_state.last_map_click_key = None
 
         st.session_state.radius_km = float(
             st.sidebar.number_input("半径（km）", 0.1, 200.0, float(st.session_state.radius_km), 0.5)
@@ -1008,6 +1048,7 @@ def main() -> None:
             st.session_state.ceo_query_raw = ""
             st.session_state.pharmacy_query_raw = ""
             st.session_state.selected_map_uid = None
+            st.session_state.last_map_click_key = None
 
         st.session_state.radius_km = float(
             st.sidebar.number_input("半径（km）", 0.1, 200.0, float(st.session_state.radius_km), 0.5)
@@ -1128,17 +1169,49 @@ def main() -> None:
     if mode_label == "薬局名で検索" and selected_uid:
         sel = show_df[show_df["UID"].astype(str) == str(selected_uid)]
         if not sel.empty:
-            center = (float(sel.iloc[0]["緯度"]), float(sel.iloc[0]["経度"]))
-            zoom = 14
+            default_center = (float(sel.iloc[0]["緯度"]), float(sel.iloc[0]["経度"]))
+            default_zoom = 14
             selected_circle_km = 2.0
         else:
             st.session_state.selected_map_uid = None
             selected_uid = None
-            center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
-            zoom = 11
+            default_center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+            default_zoom = 11
     else:
-        center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
-        zoom = 11 if (mode_label in {"法人で検索", "社長名で検索"} or (mode_label == "半径検索" and search_point is not None) or mode_label == "薬局名で検索") else 8
+        default_center = (float(show_df["緯度"].mean()), float(show_df["経度"].mean())) if not show_df.empty else (float(df["緯度"].mean()), float(df["経度"].mean()))
+        default_zoom = 11 if (mode_label in {"法人で検索", "社長名で検索"} or (mode_label == "半径検索" and search_point is not None) or mode_label == "薬局名で検索") else 8
+
+    # 検索条件が変わったときだけ、地図を検索結果側へ戻す。
+    # 地図を手で動かしただけのときは center / zoom を維持する。
+    if mode_label == "法人で検索":
+        search_signature = ("corp", corp_query_raw)
+    elif mode_label == "社長名で検索":
+        search_signature = ("ceo", ceo_query_raw)
+    elif mode_label == "薬局名で検索":
+        search_signature = ("pharmacy", pharmacy_query_raw, pref_label, str(selected_uid or ""))
+    else:
+        sp_sig = None if search_point is None else (round(search_point.lat, 7), round(search_point.lon, 7))
+        search_signature = ("radius", search_mode, sp_sig, round(float(st.session_state.radius_km), 3))
+
+    data_signature = (uploaded.name if uploaded is not None else "", len(file_bytes))
+    full_signature = (data_signature, search_signature)
+
+    if st.session_state.map_search_signature != full_signature:
+        st.session_state.map_search_signature = full_signature
+        st.session_state.map_center = [default_center[0], default_center[1]]
+        st.session_state.map_zoom = int(default_zoom)
+        st.session_state.map_bounds = None
+    else:
+        if st.session_state.map_center is None:
+            st.session_state.map_center = [default_center[0], default_center[1]]
+        if st.session_state.map_zoom is None:
+            st.session_state.map_zoom = int(default_zoom)
+
+    center = (float(st.session_state.map_center[0]), float(st.session_state.map_center[1]))
+    zoom = int(st.session_state.map_zoom)
+
+    # 地図描画後に、現在表示中の範囲へ絞った一覧を作る。
+    visible_map_df = show_df.copy()
 
     with col_map:
         st.subheader("地図")
@@ -1166,12 +1239,42 @@ def main() -> None:
                 selected_circle_km=selected_circle_km,
             )
             add_map_loading_overlay(fmap, "検索中・・・地図を読み込み中です")
-            map_data = st_folium(fmap, width=None, height=820, returned_objects=["last_clicked"], key="map")
+            map_data = st_folium(
+                fmap,
+                width=None,
+                height=820,
+                returned_objects=["last_clicked", "bounds", "zoom", "center"],
+                center=center,
+                zoom=zoom,
+                key="map",
+            )
+
+        # 地図の移動・ズームを次回描画にも引き継ぐ。
+        returned_center = (map_data or {}).get("center")
+        if returned_center and "lat" in returned_center and "lng" in returned_center:
+            st.session_state.map_center = [float(returned_center["lat"]), float(returned_center["lng"])]
+
+        returned_zoom = (map_data or {}).get("zoom")
+        if returned_zoom is not None:
+            try:
+                st.session_state.map_zoom = int(returned_zoom)
+            except (TypeError, ValueError):
+                pass
+
+        returned_bounds = (map_data or {}).get("bounds")
+        if returned_bounds:
+            st.session_state.map_bounds = returned_bounds
+
+        current_bounds = returned_bounds or st.session_state.map_bounds
+        visible_map_df = filter_by_map_bounds(map_df, current_bounds)
 
         if search_mode == "地図をクリックして指定（半径指定）":
             clicked = (map_data or {}).get("last_clicked")
             if clicked and "lat" in clicked and "lng" in clicked:
-                st.session_state.pending_point = SearchPoint(lat=float(clicked["lat"]), lon=float(clicked["lng"]))
+                click_key = (round(float(clicked["lat"]), 7), round(float(clicked["lng"]), 7))
+                if click_key != st.session_state.last_map_click_key:
+                    st.session_state.last_map_click_key = click_key
+                    st.session_state.pending_point = SearchPoint(lat=float(clicked["lat"]), lon=float(clicked["lng"]))
             pending = st.session_state.pending_point
             if pending is not None:
                 st.info(f"選択中（未確定）：緯度 {pending.lat:.6f} / 経度 {pending.lon:.6f}")
@@ -1182,6 +1285,7 @@ def main() -> None:
                     st.session_state.ceo_query_raw = ""
                     st.session_state.pharmacy_query_raw = ""
                     st.session_state.selected_map_uid = None
+                    st.rerun()
 
         if mode_label == "薬局名で検索" and pharmacy_query_raw and show_df.empty:
             st.warning("一致する薬局名が見つかりませんでした。")
@@ -1213,19 +1317,25 @@ def main() -> None:
                     btn_label = ("✅ " if is_selected else "") + label
                     if st.button(btn_label, key=f"pick_{uid}"):
                         st.session_state.selected_map_uid = uid
+                        st.rerun()
 
                 if st.session_state.selected_map_uid:
                     st.markdown("---")
                     if st.button("選択を解除", key="clear_pick"):
                         st.session_state.selected_map_uid = None
+                        st.rerun()
 
             return
 
-        view = add_link_columns(show_df).reset_index(drop=True)
+        # 「一覧」は検索対象全件ではなく、現在の地図画面に入っている薬局だけを表示する。
+        list_df = visible_map_df.copy()
+        st.caption(f"現在の地図範囲：{len(list_df):,}件")
+
+        view = add_link_columns(list_df).reset_index(drop=True)
         cols = ["☑", "薬局名", "法人名", "住所", "Googleマップ", "管理薬剤師求人", "常勤求人", "パート求人", "派遣求人", "契約社員"]
 
         if view.empty:
-            st.info("表示対象がありません。")
+            st.info("現在の地図範囲に表示対象がありません。")
             return
 
         display_uids = view["UID"].astype(str).tolist()
